@@ -39,6 +39,7 @@ configs/local/
 
 # Training outputs, checkpoints, logs, and generated figures
 outputs/
+server_results/
 runs/
 wandb/
 mlruns/
@@ -65,4 +66,3 @@ logs/
 *.mat
 *.xlsx
 *.xls
-
