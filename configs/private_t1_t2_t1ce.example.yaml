@@ -1,0 +1,24 @@
+base_config: "default.yaml"
+
+output_dir: outputs/private_t1_t2_t1ce_run
+
+data:
+  data_root: "/path/to/private/images"
+  label_xlsx: "/path/to/private/labels.xlsx"
+  case_id_col: "case_id"
+  case_id_col_index: 0
+  label_col: null
+  label_col_index: 1
+  modalities: ["t2", "t1ce", "t1"]
+  image_filename_pattern: "{mod}.nii.gz"
+  seg_filename_pattern: null
+  mask_filename_pattern: "{mod}_mask.nii.gz"
+  tumor_mask_source: "union_modality_masks"
+
+train:
+  fixed_combo: ["t2", "t1ce", "t1"]
+  enable_targeted_finetune: false
+
+test:
+  enable_drop_t1_inference_ablation: false
+

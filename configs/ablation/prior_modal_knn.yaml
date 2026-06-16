@@ -1,0 +1,8 @@
+﻿base_config: ../random_missing.yaml
+output_dir: outputs/ablation/prior_modal_knn
+experiment_name: prior_modal_knn
+model:
+  branches:
+    use_prior_edges: true
+    use_modal_edges: true
+    use_knn_edges: true

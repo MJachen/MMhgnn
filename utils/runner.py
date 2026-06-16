@@ -1,0 +1,279 @@
+﻿from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Dict, Sequence
+
+import numpy as np
+import pandas as pd
+import torch
+from sklearn.metrics import confusion_matrix
+from tqdm import tqdm
+
+from utils.metrics import compute_binary_metrics
+from utils.visualization import (
+    save_average_roi_importance,
+    save_case_overlay,
+    save_confusion_matrix,
+    save_roi_barplot,
+    save_roi_drop_plot,
+)
+
+BRANCH_DROP_OPTIONS = {
+    "full": {"prior": True, "modal": True, "knn": False},
+    "drop_anatomy": {"prior": False, "modal": True, "knn": False},
+    "drop_modal_aggregation": {"prior": True, "modal": False, "knn": False},
+}
+
+
+def move_batch_to_device(batch: Dict, device: torch.device) -> Dict:
+    moved = {}
+    for key, value in batch.items():
+        if torch.is_tensor(value):
+            moved[key] = value.to(device)
+        else:
+            moved[key] = value
+    return moved
+
+
+def choose_display_image(images: torch.Tensor, available_modalities: torch.Tensor) -> np.ndarray:
+    available = available_modalities.detach().cpu().numpy()
+    for idx, flag in enumerate(available.tolist()):
+        if flag > 0.5:
+            return images[idx].detach().cpu().numpy()
+    return images[0].detach().cpu().numpy()
+
+
+def save_metrics_files(metrics: Dict, output_dir: Path, filename_prefix: str = "metrics") -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    with open(output_dir / f"{filename_prefix}.json", "w", encoding="utf-8") as f:
+        json.dump(metrics, f, indent=2, ensure_ascii=False)
+    pd.DataFrame([metrics]).to_csv(output_dir / f"{filename_prefix}.csv", index=False)
+
+
+def _append_optional_stats(metrics: Dict, stage_stats: list) -> Dict:
+    if stage_stats:
+        stats = np.asarray(stage_stats, dtype=float)
+        metrics["num_hyperedges"] = float(stats[:, 0].mean())
+        metrics["use_anatomy_edges"] = float(stats[:, 1].mean())
+        metrics["use_prototype_edges"] = float(stats[:, 2].mean())
+    return metrics
+
+
+
+def _append_classifier_info(metrics: Dict, model) -> Dict:
+    if hasattr(model, "get_classifier_info"):
+        info = model.get_classifier_info()
+        metrics["use_mask_aware_classifier"] = bool(info.get("use_mask_aware_classifier", False))
+        metrics["mask_head_type"] = str(info.get("mask_head_type", "none"))
+        metrics["mask_order"] = ",".join(info.get("mask_order", []))
+        metrics["use_mask_aware_node_fusion"] = bool(info.get("use_mask_aware_node_fusion", False))
+        metrics["use_node_type_embed"] = bool(info.get("use_node_type_embed", False))
+        metrics["no_t1ce_t1_penalty"] = float(info.get("no_t1ce_t1_penalty", 0.0))
+    return metrics
+
+
+
+def _append_gate_stats(metrics: Dict, modality_gates: np.ndarray, roi_names: Sequence[str], mask_order: Sequence[str]) -> Dict:
+    if modality_gates.size == 0:
+        return metrics
+    gate_mean = modality_gates.mean(axis=(0, 1))
+    for mod_idx, mod_name in enumerate(mask_order):
+        metrics[f"avg_gate_{mod_name}"] = float(gate_mean[mod_idx])
+    for roi_idx, roi_name in enumerate(roi_names):
+        for mod_idx, mod_name in enumerate(mask_order):
+            metrics[f"{roi_name}_avg_gate_{mod_name}"] = float(modality_gates[:, roi_idx, mod_idx].mean())
+    return metrics
+
+
+def run_epoch(model, loader, device, criterion=None, optimizer=None, grad_clip: float | None = None, threshold: float = 0.5, desc: str = "epoch"):
+    training = optimizer is not None
+    model.train(training)
+    total_loss = 0.0
+    y_true, y_prob = [], []
+    stage_stats = []
+
+    iterator = tqdm(loader, desc=desc, leave=False)
+    for batch in iterator:
+        batch = move_batch_to_device(batch, device)
+        with torch.set_grad_enabled(training):
+            output = model(batch)
+            loss = criterion(output["logits"], batch["label"]) if criterion is not None else torch.tensor(0.0, device=device)
+            if training:
+                optimizer.zero_grad()
+                loss.backward()
+                if grad_clip is not None and grad_clip > 0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+                optimizer.step()
+
+        total_loss += float(loss.item()) * batch["label"].shape[0]
+        y_true.extend(batch["label"].detach().cpu().tolist())
+        y_prob.extend(output["prob"].detach().cpu().tolist())
+        if "stage_stats" in output:
+            stage_stats.extend(output["stage_stats"].detach().cpu().tolist())
+
+    metrics = compute_binary_metrics(y_true, y_prob, threshold=threshold)
+    metrics["loss"] = total_loss / max(len(loader.dataset), 1)
+    metrics = _append_optional_stats(metrics, stage_stats)
+    metrics = _append_classifier_info(metrics, model)
+    return metrics
+
+
+@torch.no_grad()
+def collect_predictions(model, loader, device, branch_override=None, explain_num_cases: int = 0):
+    y_true, y_prob = [], []
+    roi_scores_all, stage_stats_all = [], []
+    modality_gates_all = []
+    combos_all = []
+    case_payloads = []
+    exported = 0
+    for batch in tqdm(loader, desc="evaluate", leave=False):
+        batch = move_batch_to_device(batch, device)
+        output = model(batch, branch_override=branch_override)
+        probs = output["prob"].detach().cpu().numpy()
+        attn = output["roi_attention"].detach().cpu().numpy()
+        labels = batch["label"].detach().cpu().numpy()
+        y_true.extend(labels.tolist())
+        y_prob.extend(probs.tolist())
+        roi_scores_all.extend(attn.tolist())
+        if "stage_stats" in output:
+            stage_stats_all.extend(output["stage_stats"].detach().cpu().tolist())
+        if "modality_gates" in output:
+            modality_gates_all.extend(output["modality_gates"].detach().cpu().tolist())
+        combos_all.extend([tuple(c) for c in batch.get("combo", [])])
+        if exported < explain_num_cases:
+            batch_size = len(batch["case_id"])
+            for i in range(batch_size):
+                if exported >= explain_num_cases:
+                    break
+                case_payloads.append({
+                    "case_id": batch["case_id"][i],
+                    "images": batch["images"][i].detach().cpu(),
+                    "available_modalities": batch["available_modalities"][i].detach().cpu(),
+                    "roi_masks": batch["roi_masks"][i].detach().cpu(),
+                    "attention": attn[i],
+                })
+                exported += 1
+    return {
+        "y_true": np.asarray(y_true, dtype=int),
+        "y_prob": np.asarray(y_prob, dtype=float),
+        "roi_scores": np.asarray(roi_scores_all, dtype=float),
+        "stage_stats": np.asarray(stage_stats_all, dtype=float) if stage_stats_all else np.zeros((0, 3), dtype=float),
+        "modality_gates": np.asarray(modality_gates_all, dtype=float) if modality_gates_all else np.zeros((0, 0, 0), dtype=float),
+        "combos": combos_all,
+        "case_payloads": case_payloads,
+    }
+
+
+def evaluate_with_explanations(
+    model,
+    loader,
+    device,
+    roi_names: Sequence[str],
+    output_dir: str,
+    threshold: float = 0.5,
+    threshold_group: str = "global",
+    explain_num_cases: int = 3,
+    roi_drop_enabled: bool = True,
+    edge_type_drop_enabled: bool = True,
+):
+    model.eval()
+    output_dir = Path(output_dir)
+    case_dir = output_dir / "case_explanations"
+    case_dir.mkdir(parents=True, exist_ok=True)
+
+    collected = collect_predictions(model, loader, device, explain_num_cases=explain_num_cases)
+    y_true = collected["y_true"]
+    y_prob = collected["y_prob"]
+    roi_scores = collected["roi_scores"]
+    stage_stats = collected["stage_stats"]
+    modality_gates = collected["modality_gates"]
+
+    metrics = compute_binary_metrics(y_true, y_prob, threshold=threshold)
+    y_pred = (y_prob >= threshold).astype(int)
+    cm = confusion_matrix(y_true, y_pred, labels=[0, 1])
+    save_confusion_matrix(cm, ["LGG(0)", "HGG(1)"], output_dir / "confusion_matrix.png")
+    metrics = _append_optional_stats(metrics, stage_stats.tolist() if len(stage_stats) > 0 else [])
+    metrics = _append_classifier_info(metrics, model)
+    metrics["threshold"] = float(threshold)
+    metrics["threshold_group"] = threshold_group
+    metrics["applied_threshold"] = float(threshold)
+    mask_order = model.get_classifier_info().get("mask_order", []) if hasattr(model, "get_classifier_info") else []
+    metrics = _append_gate_stats(metrics, modality_gates, roi_names, mask_order)
+    save_metrics_files(metrics, output_dir)
+
+    if modality_gates.size > 0 and hasattr(model, "get_classifier_info"):
+        gate_rows = []
+        mask_order = model.get_classifier_info().get("mask_order", [])
+        global_gate = modality_gates.mean(axis=(0, 1))
+        gate_rows.append({"node": "global", **{f"avg_gate_{mod}": float(global_gate[idx]) for idx, mod in enumerate(mask_order)}})
+        for roi_idx, roi_name in enumerate(roi_names):
+            gate_rows.append({"node": roi_name, **{f"avg_gate_{mod}": float(modality_gates[:, roi_idx, idx].mean()) for idx, mod in enumerate(mask_order)}})
+        pd.DataFrame(gate_rows).to_csv(output_dir / "gating_stats.csv", index=False)
+
+    if len(roi_scores) > 0:
+        roi_mean = roi_scores.mean(axis=0)
+        roi_std = roi_scores.std(axis=0)
+    else:
+        roi_mean = np.zeros(len(roi_names), dtype=float)
+        roi_std = np.zeros(len(roi_names), dtype=float)
+    roi_df = pd.DataFrame({"roi": list(roi_names), "mean_importance": roi_mean, "std_importance": roi_std})
+    roi_df.to_csv(output_dir / "roi_importance_stats.csv", index=False)
+    roi_df.to_csv(output_dir / "node_importance.csv", index=False)
+    save_average_roi_importance(roi_names, roi_scores.tolist() if len(roi_scores) > 0 else [], output_dir / "avg_roi_importance.csv", output_dir / "avg_roi_importance.png")
+
+    for payload in collected["case_payloads"]:
+        case_id = payload["case_id"]
+        attention = payload["attention"]
+        score_map = {roi_names[j]: float(attention[j]) for j in range(len(roi_names))}
+        save_roi_barplot(roi_names, attention, f"ROI importance: {case_id}", case_dir / f"{case_id}_roi_importance.png")
+        image_3d = choose_display_image(payload["images"], payload["available_modalities"])
+        roi_masks = {roi_names[j]: payload["roi_masks"][j].numpy() for j in range(len(roi_names))}
+        save_case_overlay(image_3d, roi_masks, score_map, case_dir / f"{case_id}_overlay.png")
+
+    if roi_drop_enabled:
+        roi_drop_results = roi_drop_analysis(model, loader, device, roi_names)
+        roi_drop_df = pd.DataFrame({
+            "roi": list(roi_names),
+            "mean_prob_drop": roi_drop_results.mean(axis=0) if len(roi_drop_results) > 0 else np.zeros(len(roi_names)),
+            "std_prob_drop": roi_drop_results.std(axis=0) if len(roi_drop_results) > 0 else np.zeros(len(roi_names)),
+        })
+        roi_drop_df.to_csv(output_dir / "roi_drop.csv", index=False)
+        save_roi_drop_plot(roi_drop_df, output_dir / "roi_drop.png", title="ROI dropping probability delta")
+
+    if edge_type_drop_enabled:
+        enabled = model.get_enabled_branches()
+        if enabled["prior"] and enabled["modal"]:
+            edge_drop_rows = []
+            for name, override in BRANCH_DROP_OPTIONS.items():
+                drop_collected = collect_predictions(model, loader, device, branch_override=override)
+                drop_metrics = compute_binary_metrics(drop_collected["y_true"], drop_collected["y_prob"], threshold=threshold)
+                drop_metrics = _append_optional_stats(drop_metrics, drop_collected["stage_stats"].tolist() if len(drop_collected["stage_stats"]) > 0 else [])
+                drop_metrics = _append_classifier_info(drop_metrics, model)
+                drop_metrics["threshold"] = float(threshold)
+                drop_metrics["threshold_group"] = threshold_group
+                drop_metrics["applied_threshold"] = float(threshold)
+                drop_metrics["setting"] = name
+                edge_drop_rows.append(drop_metrics)
+            pd.DataFrame(edge_drop_rows).to_csv(output_dir / "edge_type_drop_metrics.csv", index=False)
+
+    return metrics
+
+
+@torch.no_grad()
+def roi_drop_analysis(model, loader, device, roi_names: Sequence[str]) -> np.ndarray:
+    deltas = []
+    for batch in tqdm(loader, desc="roi_drop", leave=False):
+        batch = move_batch_to_device(batch, device)
+        base = model(batch)["prob"]
+        batch_deltas = []
+        for roi_idx in range(len(roi_names)):
+            drop_mask = torch.ones_like(batch["roi_valid"])
+            drop_mask[:, roi_idx] = 0.0
+            dropped = model(batch, roi_drop_mask=drop_mask)["prob"]
+            batch_deltas.append((base - dropped).detach().cpu().numpy())
+        batch_deltas = np.stack(batch_deltas, axis=1)
+        deltas.append(batch_deltas)
+    if not deltas:
+        return np.zeros((0, len(roi_names)), dtype=float)
+    return np.concatenate(deltas, axis=0)

@@ -1,0 +1,8 @@
+﻿base_config: ../default.yaml
+output_dir: outputs/ablation_full/knn_only
+experiment_name: knn_only
+model:
+  branches:
+    use_prior_edges: false
+    use_modal_edges: false
+    use_knn_edges: true

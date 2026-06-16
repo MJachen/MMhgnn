@@ -1,0 +1,114 @@
+seed: 42
+output_dir: outputs/demo_run
+
+data:
+  data_root: "/home/cjc/brats2020/brats2021/"
+  label_xlsx: "/home/cjc/brats2020/brats2021_label2020.xlsx"
+  case_id_col: "BraTS2021"
+  label_col: "label"
+  modalities: ["t2", "t1ce", "t1", "flair"]
+  target_shape: null
+  crop_mode: "wt_bbox"
+  bbox_margin: 6
+  num_workers: 0
+  split_ratio: [0.8, 0.1, 0.1]
+  split_json: null
+
+train:
+  mode: "full_modality_train"
+  fixed_combo: ["t2", "t1ce", "t1", "flair"]
+  epochs: 20
+  batch_size: 2
+  lr: 0.0005
+  weight_decay: 0.0001
+  device: "cuda"
+  weighted_ce: true
+  weighted_sampler: false
+  grad_clip: 5.0
+  log_interval: 10
+  early_stop_patience: 8
+  save_metric: "bal_acc"
+  enable_targeted_finetune: true
+  fine_tune_epochs: 8
+  fine_tune_lr_scale: 0.1
+  freeze_backbone_in_finetune: false
+  fine_tune_sampling_mode: "targeted_no_t1ce"
+  fine_tune_ratio_full: 0.7
+  fine_tune_ratio_t2_only: 0.1
+  fine_tune_ratio_flair_only: 0.1
+  fine_tune_ratio_t2_flair: 0.1
+  fine_tune_ratio_drop_t1ce_fullcontext: 0.0
+  curriculum_stage1_ratio: 0.3
+  curriculum_stage2_ratio: 0.4
+  curriculum_stage3_ratio: 0.3
+  stage2_full_ratio: 0.7
+  stage2_single_missing_ratio: 0.3
+  stage3_full_ratio: 0.4
+  stage3_single_missing_ratio: 0.3
+  stage3_double_missing_ratio: 0.2
+  stage3_triple_missing_ratio: 0.1
+
+loss:
+  loss_type: "weighted_ce"
+  use_class_balanced_loss: true
+  class_balance_mode: "inverse_frequency"
+
+calibration:
+  enable_threshold_calibration: true
+  threshold_metric: "balanced_accuracy"
+  threshold_mode: "grouped_3way_t1ce_t1"
+  default_threshold: 0.5
+
+graph:
+  use_prototype_nodes: false
+  use_prototype_edges: false
+  num_nodes: 5
+  num_hyperedges: 5
+
+fusion:
+  use_mask_aware_node_fusion: true
+  use_node_type_embed: true
+  mask_embed_dim: 8
+  node_type_embed_dim: 4
+  gating_hidden_dim: 32
+  no_t1ce_t1_penalty: 1.0
+
+model:
+  roi_names: ["core", "boundary", "peri_inner", "peri_outer", "distal_normal"]
+  num_explicit_nodes: 5
+  backbone_channels: [8, 16, 32]
+  backbone_out_dim: 32
+  roi_hidden_dim: 64
+  hgnn_hidden_dim: 64
+  classifier_hidden_dim: 64
+  use_mask_aware_classifier: true
+  mask_head_type: "bias"
+  mask_embed_dim: 8
+  mask_order: ["t1", "t1ce", "t2", "flair"]
+  dropout: 0.2
+  stage1_num_layers: 1
+  graph_num_layers: 2
+  q_core: 0.4
+  peri_inner_radius: 3
+  peri_outer_radius: 7
+  allow_full_resolution_input: true
+  branches:
+    use_modal_edges: true
+    use_prior_edges: true
+    use_knn_edges: false
+
+eval:
+  threshold: 0.5
+  explain_num_cases: 3
+  save_confusion_matrix: true
+  edge_type_drop_enabled: true
+  roi_drop_enabled: true
+  test_all_combos: true
+  test_all_combos_when_random_missing: true
+
+logging:
+  level: "INFO"
+
+test:
+  enable_drop_t1_inference_ablation: false
+  drop_t1_ablation_combos: ["t1", "t2_t1", "t1_flair", "t2_t1_flair"]

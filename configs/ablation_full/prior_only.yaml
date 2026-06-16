@@ -1,0 +1,8 @@
+﻿base_config: ../default.yaml
+output_dir: outputs/ablation_full/prior_only
+experiment_name: prior_only
+model:
+  branches:
+    use_prior_edges: true
+    use_modal_edges: false
+    use_knn_edges: false
