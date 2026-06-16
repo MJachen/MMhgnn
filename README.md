@@ -63,10 +63,33 @@
 
 ## 3. Data Paths
 
-默认服务器路径：
+公开 BraTS 数据集的格式和路径由 YAML 配置控制。公共格式配置为：
+
+```text
+configs/brats2020_public_base.yaml
+```
+
+本地路径配置：
+
+```text
+configs/brats2020_public_local.yaml
+```
+
+服务器路径配置：
+
+```text
+configs/brats2020_public_server.yaml
+```
+
+当前服务器路径：
 
 - `data_root = /home/cjc/brats2020/brats2021/`
 - `label_xlsx = /home/cjc/brats2020/brats2021_label2020.xlsx`
+
+当前本地路径：
+
+- `data_root = E:/brats2021`
+- `label_xlsx = E:/EXPS/tensorexps/brats2021_label2020.xlsx`
 
 标签文件至少包含两列：
 
@@ -126,7 +149,19 @@ pip install -r requirements.txt
 训练，固定四模态：
 
 ```bash
-python train.py --config configs/default.yaml
+python train.py --config configs/brats2020_public_server.yaml
+```
+
+本地公开 BraTS 数据检查：
+
+```powershell
+python scripts/check_dataset_config.py --config configs/brats2020_public_local.yaml
+```
+
+服务器公开 BraTS 数据检查：
+
+```bash
+python scripts/check_dataset_config.py --config configs/brats2020_public_server.yaml
 ```
 
 训练，随机缺失：

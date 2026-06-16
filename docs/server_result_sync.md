@@ -19,6 +19,17 @@ python evaluate.py --config <config.yaml> --checkpoint <best.pt>
 
 因此服务器端测试代码是固定的，推荐统一使用脚本：
 
+公开 BraTS 数据集：
+
+```bash
+bash scripts/server_evaluate_and_pack.sh \
+  --config configs/brats2020_public_server.yaml \
+  --checkpoint outputs/brats2020_public_server/checkpoints/best.pt \
+  --run-name brats2020_public_eval
+```
+
+私有数据集：
+
 ```bash
 bash scripts/server_evaluate_and_pack.sh \
   --config configs/private_t1_t2_t1ce.yaml \
@@ -105,6 +116,17 @@ git pull --ff-only
 
 ### 服务器运行固定测试并打包
 
+公开 BraTS 数据集：
+
+```bash
+bash scripts/server_evaluate_and_pack.sh \
+  --config configs/brats2020_public_server.yaml \
+  --checkpoint outputs/brats2020_public_server/checkpoints/best.pt \
+  --run-name brats2020_public_eval
+```
+
+私有数据集：
+
 ```bash
 bash scripts/server_evaluate_and_pack.sh \
   --config configs/private_t1_t2_t1ce.yaml \
@@ -126,4 +148,3 @@ bash scripts/server_evaluate_and_pack.sh \
 - 每次测试建议用明确的 `--run-name`，例如 `baseline_seed42_eval`、`private_t1_t2_t1ce_eval`。
 - 如果服务器会继续训练，不要开自动 `git pull`，避免训练中途代码变化。
 - 本地解读结果时优先看 `metrics.csv`，再看每个组合目录下的解释性图片。
-

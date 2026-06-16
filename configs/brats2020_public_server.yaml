@@ -1,0 +1,8 @@
+base_config: "brats2020_public_base.yaml"
+
+output_dir: outputs/brats2020_public_server
+
+data:
+  data_root: "/home/cjc/brats2020/brats2021"
+  label_xlsx: "/home/cjc/brats2020/brats2021_label2020.xlsx"
+

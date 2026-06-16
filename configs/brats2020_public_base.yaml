@@ -1,0 +1,23 @@
+base_config: "default.yaml"
+
+output_dir: outputs/brats2020_public
+
+data:
+  dataset_format: "brats_case_folder_with_seg"
+  case_id_col: "BraTS2021"
+  case_id_col_index: null
+  label_col: "label"
+  label_col_index: null
+  modalities: ["t2", "t1ce", "t1", "flair"]
+  image_filename_pattern: "{case_id}_{mod}.nii.gz"
+  seg_filename_pattern: "{case_id}_seg.nii.gz"
+  mask_filename_pattern: null
+  tumor_mask_source: "seg"
+
+train:
+  fixed_combo: ["t2", "t1ce", "t1", "flair"]
+  enable_targeted_finetune: true
+
+test:
+  enable_drop_t1_inference_ablation: false
+
