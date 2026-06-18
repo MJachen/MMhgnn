@@ -245,6 +245,12 @@ def main():
                 val_collected["combos"],
                 metric=calibration_cfg.get("threshold_metric", "balanced_accuracy"),
                 default_threshold=float(calibration_cfg.get("default_threshold", 0.5)),
+                min_samples=int(calibration_cfg.get("min_samples", 2)),
+                min_positive=int(calibration_cfg.get("min_positive", 1)),
+                min_negative=int(calibration_cfg.get("min_negative", 1)),
+                threshold_min=float(calibration_cfg.get("threshold_min", 0.0)),
+                threshold_max=float(calibration_cfg.get("threshold_max", 1.0)),
+                tie_break=str(calibration_cfg.get("tie_break", "first")),
             )
         else:
             val_collected = collect_predictions(model, val_loader, device)
@@ -252,6 +258,9 @@ def main():
                 val_collected["y_true"],
                 val_collected["y_prob"],
                 metric=calibration_cfg.get("threshold_metric", "balanced_accuracy"),
+                threshold_min=float(calibration_cfg.get("threshold_min", 0.0)),
+                threshold_max=float(calibration_cfg.get("threshold_max", 1.0)),
+                tie_break=str(calibration_cfg.get("tie_break", "first")),
             )
             calibration_result["mode"] = "global"
         calibration_result["enabled"] = True

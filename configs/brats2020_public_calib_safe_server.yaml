@@ -1,0 +1,15 @@
+base_config: "brats2020_public_server.yaml"
+
+output_dir: outputs/brats2020_public_calib_safe_server
+
+calibration:
+  enable_threshold_calibration: true
+  threshold_metric: "balanced_accuracy"
+  threshold_mode: "grouped_3way_t1ce_t1"
+  default_threshold: 0.5
+  threshold_min: 0.05
+  threshold_max: 0.95
+  tie_break: "closest_to_0.5"
+  min_samples: 8
+  min_positive: 2
+  min_negative: 2

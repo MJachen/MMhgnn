@@ -1,0 +1,13 @@
+base_config: "brats2020_public_calib_safe_server.yaml"
+
+output_dir: outputs/brats2020_public_no_t1ce_focus_server
+
+train:
+  mode: "missing_curriculum_train"
+  enable_targeted_finetune: true
+  fine_tune_sampling_mode: "targeted_no_t1ce"
+  fine_tune_ratio_full: 0.2
+  fine_tune_ratio_t2_only: 0.2
+  fine_tune_ratio_flair_only: 0.2
+  fine_tune_ratio_t2_flair: 0.4
+  fine_tune_ratio_drop_t1ce_fullcontext: 0.0
