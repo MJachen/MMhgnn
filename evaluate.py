@@ -24,6 +24,8 @@ def parse_args():
     parser.add_argument("--combo", nargs="*", default=None)
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--output-dir", type=str, default=None)
+    parser.add_argument("--threshold-override", type=float, default=None)
+    parser.add_argument("--ignore-checkpoint-calibration", action="store_true")
     return parser.parse_args()
 
 
@@ -53,7 +55,19 @@ def main():
     model.eval()
     calibration_result = checkpoint.get("threshold_calibration", {})
     threshold = float(checkpoint.get("calibrated_threshold", config.get("calibration", {}).get("default_threshold", config["eval"].get("threshold", 0.5))))
-    logger.info("Using evaluation threshold mode=%s default/global=%.4f", calibration_result.get("mode", "global"), threshold)
+    if args.ignore_checkpoint_calibration:
+        calibration_result = {}
+        threshold = float(config.get("calibration", {}).get("default_threshold", config["eval"].get("threshold", 0.5)))
+    if args.threshold_override is not None:
+        calibration_result = {}
+        threshold = float(args.threshold_override)
+    logger.info(
+        "Using evaluation threshold mode=%s default/global=%.4f override=%s ignore_checkpoint_calibration=%s",
+        calibration_result.get("mode", "global"),
+        threshold,
+        args.threshold_override,
+        args.ignore_checkpoint_calibration,
+    )
 
     output_dir = ensure_dir(Path(config["output_dir"]) / "evaluate_only")
     combos = [tuple(args.combo)] if args.combo else get_all_modality_combinations(config["data"]["modalities"])

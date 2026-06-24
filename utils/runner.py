@@ -125,6 +125,7 @@ def collect_predictions(model, loader, device, branch_override=None, explain_num
     roi_scores_all, stage_stats_all = [], []
     modality_gates_all = []
     combos_all = []
+    case_ids_all = []
     case_payloads = []
     exported = 0
     for batch in tqdm(loader, desc="evaluate", leave=False):
@@ -141,6 +142,7 @@ def collect_predictions(model, loader, device, branch_override=None, explain_num
         if "modality_gates" in output:
             modality_gates_all.extend(output["modality_gates"].detach().cpu().tolist())
         combos_all.extend([tuple(c) for c in batch.get("combo", [])])
+        case_ids_all.extend(batch.get("case_id", []))
         if exported < explain_num_cases:
             batch_size = len(batch["case_id"])
             for i in range(batch_size):
@@ -161,6 +163,7 @@ def collect_predictions(model, loader, device, branch_override=None, explain_num
         "stage_stats": np.asarray(stage_stats_all, dtype=float) if stage_stats_all else np.zeros((0, 3), dtype=float),
         "modality_gates": np.asarray(modality_gates_all, dtype=float) if modality_gates_all else np.zeros((0, 0, 0), dtype=float),
         "combos": combos_all,
+        "case_ids": case_ids_all,
         "case_payloads": case_payloads,
     }
 
@@ -201,6 +204,20 @@ def evaluate_with_explanations(
     mask_order = model.get_classifier_info().get("mask_order", []) if hasattr(model, "get_classifier_info") else []
     metrics = _append_gate_stats(metrics, modality_gates, roi_names, mask_order)
     save_metrics_files(metrics, output_dir)
+
+    prediction_rows = []
+    for case_id, combo, label, prob, pred in zip(collected["case_ids"], collected["combos"], y_true, y_prob, y_pred):
+        prediction_rows.append({
+            "case_id": case_id,
+            "combo": "_".join(combo),
+            "label": int(label),
+            "prob": float(prob),
+            "threshold": float(threshold),
+            "threshold_group": threshold_group,
+            "pred": int(pred),
+            "correct": bool(int(label) == int(pred)),
+        })
+    pd.DataFrame(prediction_rows).to_csv(output_dir / "predictions.csv", index=False)
 
     if modality_gates.size > 0 and hasattr(model, "get_classifier_info"):
         gate_rows = []

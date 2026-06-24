@@ -6,6 +6,8 @@ CHECKPOINT="outputs/demo_run/checkpoints/best.pt"
 OUT_ROOT="outputs/server_eval"
 RUN_NAME="eval_$(date +%Y%m%d_%H%M%S)"
 COMBO=()
+THRESHOLD_OVERRIDE=""
+IGNORE_CHECKPOINT_CALIBRATION=0
 
 usage() {
   cat <<'EOF'
@@ -18,6 +20,8 @@ Usage:
 Optional:
   --out-root outputs/server_eval
   --combo t2 t1ce
+  --threshold-override 0.5
+  --ignore-checkpoint-calibration
 
 Default behavior evaluates all non-empty modality combinations configured in the YAML.
 EOF
@@ -40,6 +44,14 @@ while [[ $# -gt 0 ]]; do
     --run-name)
       RUN_NAME="$2"
       shift 2
+      ;;
+    --threshold-override)
+      THRESHOLD_OVERRIDE="$2"
+      shift 2
+      ;;
+    --ignore-checkpoint-calibration)
+      IGNORE_CHECKPOINT_CALIBRATION=1
+      shift
       ;;
     --combo)
       shift
@@ -67,6 +79,12 @@ COMMAND=(python evaluate.py --config "${CONFIG}" --checkpoint "${CHECKPOINT}" --
 if [[ ${#COMBO[@]} -gt 0 ]]; then
   COMMAND+=(--combo "${COMBO[@]}")
 fi
+if [[ -n "${THRESHOLD_OVERRIDE}" ]]; then
+  COMMAND+=(--threshold-override "${THRESHOLD_OVERRIDE}")
+fi
+if [[ "${IGNORE_CHECKPOINT_CALIBRATION}" -eq 1 ]]; then
+  COMMAND+=(--ignore-checkpoint-calibration)
+fi
 
 printf '%q ' "${COMMAND[@]}" > "${RUN_DIR}/command.txt"
 printf '\n' >> "${RUN_DIR}/command.txt"
@@ -76,6 +94,8 @@ printf '\n' >> "${RUN_DIR}/command.txt"
   echo "config=${CONFIG}"
   echo "checkpoint=${CHECKPOINT}"
   echo "out_root=${OUT_ROOT}"
+  echo "threshold_override=${THRESHOLD_OVERRIDE}"
+  echo "ignore_checkpoint_calibration=${IGNORE_CHECKPOINT_CALIBRATION}"
   echo "started_at=$(date -Is)"
   echo "host=$(hostname)"
   git rev-parse HEAD 2>/dev/null | sed 's/^/git_commit=/'
@@ -101,4 +121,3 @@ tar -czf "${ARCHIVE}" -C "${OUT_ROOT}" "${RUN_NAME}"
 echo "Evaluation finished."
 echo "Result directory: ${RUN_DIR}"
 echo "Archive: ${ARCHIVE}"
-

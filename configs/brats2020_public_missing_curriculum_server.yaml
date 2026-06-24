@@ -1,0 +1,7 @@
+base_config: "brats2020_public_calib_safe_server.yaml"
+
+output_dir: outputs/brats2020_public_missing_curriculum_server
+
+train:
+  mode: "missing_curriculum_train"
+  enable_targeted_finetune: false

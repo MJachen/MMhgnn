@@ -45,10 +45,22 @@ def compute_binary_metrics(y_true, y_prob, threshold: float = 0.5) -> Dict[str, 
     }
 
 
-def calibrate_threshold(y_true, y_prob, metric: str = "balanced_accuracy", num_steps: int = 201) -> Dict[str, float]:
+def calibrate_threshold(
+    y_true,
+    y_prob,
+    metric: str = "balanced_accuracy",
+    num_steps: int = 201,
+    threshold_min: float = 0.0,
+    threshold_max: float = 1.0,
+    tie_break: str = "first",
+) -> Dict[str, float]:
     """Search a global decision threshold on validation predictions only."""
     y_true = np.asarray(y_true).astype(int)
     y_prob = np.asarray(y_prob).astype(float)
+    threshold_min = float(np.clip(threshold_min, 0.0, 1.0))
+    threshold_max = float(np.clip(threshold_max, 0.0, 1.0))
+    if threshold_min > threshold_max:
+        threshold_min, threshold_max = threshold_max, threshold_min
     if len(y_true) == 0:
         return {
             "threshold": 0.5,
@@ -58,7 +70,7 @@ def calibrate_threshold(y_true, y_prob, metric: str = "balanced_accuracy", num_s
             "warning": "No validation samples available for threshold calibration.",
         }
 
-    thresholds = np.linspace(0.0, 1.0, num_steps)
+    thresholds = np.linspace(threshold_min, threshold_max, num_steps)
     best_threshold = 0.5
     best_score = -1.0
     for threshold in thresholds:
@@ -71,7 +83,10 @@ def calibrate_threshold(y_true, y_prob, metric: str = "balanced_accuracy", num_s
             score = metrics["f1"]
         else:
             raise ValueError(f"Unsupported calibration metric: {metric}")
-        if score > best_score:
+        is_better = score > best_score
+        if score == best_score and tie_break == "closest_to_0.5":
+            is_better = abs(float(threshold) - 0.5) < abs(best_threshold - 0.5)
+        if is_better:
             best_score = float(score)
             best_threshold = float(threshold)
 
@@ -80,6 +95,9 @@ def calibrate_threshold(y_true, y_prob, metric: str = "balanced_accuracy", num_s
         "metric": metric,
         "score": best_score,
         "default_threshold": 0.5,
+        "threshold_min": threshold_min,
+        "threshold_max": threshold_max,
+        "tie_break": tie_break,
         "warning": "",
     }
 
@@ -100,9 +118,28 @@ def modality_group_from_combo(combo: Iterable[str]) -> str:
     return modality_group_from_mask(mask)
 
 
-def calibrate_grouped_3way_t1ce_t1(y_true, y_prob, combos, metric: str = "balanced_accuracy", default_threshold: float = 0.5, min_samples: int = 2) -> Dict[str, object]:
+def calibrate_grouped_3way_t1ce_t1(
+    y_true,
+    y_prob,
+    combos,
+    metric: str = "balanced_accuracy",
+    default_threshold: float = 0.5,
+    min_samples: int = 2,
+    min_positive: int = 1,
+    min_negative: int = 1,
+    threshold_min: float = 0.0,
+    threshold_max: float = 1.0,
+    tie_break: str = "first",
+) -> Dict[str, object]:
     """Calibrate three validation-only thresholds using t1ce/t1 visibility groups."""
-    global_result = calibrate_threshold(y_true, y_prob, metric=metric)
+    global_result = calibrate_threshold(
+        y_true,
+        y_prob,
+        metric=metric,
+        threshold_min=threshold_min,
+        threshold_max=threshold_max,
+        tie_break=tie_break,
+    )
     global_threshold = float(global_result.get("threshold", default_threshold))
     y_true = np.asarray(y_true).astype(int)
     y_prob = np.asarray(y_prob).astype(float)
@@ -124,6 +161,12 @@ def calibrate_grouped_3way_t1ce_t1(y_true, y_prob, combos, metric: str = "balanc
         "threshold_no_t1ce_no_t1": global_threshold,
         "threshold_no_t1ce_with_t1": global_threshold,
         "fallback_info": {},
+        "threshold_min": float(threshold_min),
+        "threshold_max": float(threshold_max),
+        "tie_break": tie_break,
+        "min_samples": int(min_samples),
+        "min_positive": int(min_positive),
+        "min_negative": int(min_negative),
         "groups": {},
     }
 
@@ -148,9 +191,13 @@ def calibrate_grouped_3way_t1ce_t1(y_true, y_prob, combos, metric: str = "balanc
             labels = y_true[indices]
             group_info["num_positive"] = int((labels == 1).sum())
             group_info["num_negative"] = int((labels == 0).sum())
-        if len(indices) < min_samples or (indices and len(np.unique(y_true[indices])) < 2):
+        insufficient_samples = len(indices) < min_samples
+        insufficient_classes = bool(indices) and (
+            group_info["num_positive"] < min_positive or group_info["num_negative"] < min_negative
+        )
+        if insufficient_samples or insufficient_classes:
             group_info["fallback"] = True
-            group_info["warning"] = "Fallback to global threshold because validation group has too few samples or a single class."
+            group_info["warning"] = "Fallback to global threshold because validation group has too few samples or class coverage."
             group_info["fallback_target"] = "global_threshold"
             result["fallback_info"][name] = {
                 "reason": group_info["warning"],
@@ -158,7 +205,14 @@ def calibrate_grouped_3way_t1ce_t1(y_true, y_prob, combos, metric: str = "balanc
                 "fallback_target": "global_threshold",
             }
         else:
-            group_result = calibrate_threshold(y_true[indices], y_prob[indices], metric=metric)
+            group_result = calibrate_threshold(
+                y_true[indices],
+                y_prob[indices],
+                metric=metric,
+                threshold_min=threshold_min,
+                threshold_max=threshold_max,
+                tie_break=tie_break,
+            )
             group_info["threshold"] = float(group_result["threshold"])
             group_info["score"] = float(group_result["score"])
             result[key_map[name]] = float(group_result["threshold"])
