@@ -4,3 +4,4 @@ output_dir: outputs/brats2020_public_missing_curriculum_server
 
 train:
   mode: "missing_curriculum_train"
+  enable_targeted_finetune: false

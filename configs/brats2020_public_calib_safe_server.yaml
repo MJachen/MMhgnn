@@ -2,6 +2,29 @@ base_config: "brats2020_public_server.yaml"
 
 output_dir: outputs/brats2020_public_calib_safe_server
 
+data:
+  split_json: outputs/protocol/brats2020_public_split_seed42.json
+
+train:
+  enable_targeted_finetune: false
+  joint_validation:
+    enabled: true
+    full_combo: ["t2", "t1ce", "t1", "flair"]
+    no_t1ce_combos:
+      - ["t2"]
+      - ["flair"]
+      - ["t2", "flair"]
+    monitor_combos:
+      - ["t2", "t1", "flair"]
+    weights:
+      no_t1ce_mean_auc: 0.4
+      no_t1ce_mean_bal_acc: 0.4
+      full_auc: 0.1
+      full_bal_acc: 0.1
+    min_no_t1ce_auc_delta: 0.0
+    min_no_t1ce_bal_acc_delta: 0.0
+    max_full_bal_acc_drop: 0.03
+
 calibration:
   enable_threshold_calibration: true
   threshold_metric: "balanced_accuracy"
