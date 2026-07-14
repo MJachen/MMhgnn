@@ -11,6 +11,7 @@ from sklearn.metrics import confusion_matrix
 from tqdm import tqdm
 
 from utils.metrics import compute_binary_metrics
+from utils.losses import auxiliary_segmentation_loss
 from utils.visualization import (
     save_average_roi_importance,
     save_case_overlay,
@@ -86,19 +87,53 @@ def _append_gate_stats(metrics: Dict, modality_gates: np.ndarray, roi_names: Seq
     return metrics
 
 
-def run_epoch(model, loader, device, criterion=None, optimizer=None, grad_clip: float | None = None, threshold: float = 0.5, desc: str = "epoch"):
+def run_epoch(
+    model,
+    loader,
+    device,
+    criterion=None,
+    optimizer=None,
+    grad_clip: float | None = None,
+    threshold: float = 0.5,
+    desc: str = "epoch",
+    segmentation_config: Dict | None = None,
+):
     training = optimizer is not None
     model.train(training)
     total_loss = 0.0
+    total_classification_loss = 0.0
+    segmentation_totals = {"seg_bce_loss": 0.0, "seg_dice_loss": 0.0, "segmentation_loss": 0.0, "wt_dice": 0.0}
+    segmentation_cases = 0
     y_true, y_prob = [], []
     stage_stats = []
+
+    segmentation_config = segmentation_config or {}
+    auxiliary_enabled = bool(segmentation_config.get("enabled", False))
+    lambda_seg = float(segmentation_config.get("lambda_seg", 0.0))
+    bce_weight = float(segmentation_config.get("seg_bce_weight", 0.5))
+    dice_weight = float(segmentation_config.get("seg_dice_weight", 0.5))
+    if lambda_seg < 0:
+        raise ValueError(f"lambda_seg must be non-negative, got {lambda_seg}.")
 
     iterator = tqdm(loader, desc=desc, leave=False)
     for batch in iterator:
         batch = move_batch_to_device(batch, device)
+        use_segmentation_loss = auxiliary_enabled and lambda_seg > 0 and "seg" in batch and criterion is not None
         with torch.set_grad_enabled(training):
-            output = model(batch)
-            loss = criterion(output["logits"], batch["label"]) if criterion is not None else torch.tensor(0.0, device=device)
+            output = model(batch, return_segmentation=use_segmentation_loss)
+            classification_loss = criterion(output["logits"], batch["label"]) if criterion is not None else torch.tensor(0.0, device=device)
+            loss = classification_loss
+            segmentation_terms = None
+            if use_segmentation_loss:
+                if "seg_logits" not in output:
+                    raise RuntimeError("Auxiliary segmentation is enabled for loss computation, but seg_logits are missing.")
+                segmentation_terms = auxiliary_segmentation_loss(
+                    output["seg_logits"],
+                    batch["seg"],
+                    bce_weight=bce_weight,
+                    dice_weight=dice_weight,
+                )
+                loss = classification_loss + lambda_seg * segmentation_terms["segmentation_loss"]
             if training:
                 optimizer.zero_grad()
                 loss.backward()
@@ -106,7 +141,13 @@ def run_epoch(model, loader, device, criterion=None, optimizer=None, grad_clip: 
                     torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
                 optimizer.step()
 
-        total_loss += float(loss.item()) * batch["label"].shape[0]
+        current_batch_size = batch["label"].shape[0]
+        total_loss += float(loss.item()) * current_batch_size
+        total_classification_loss += float(classification_loss.item()) * current_batch_size
+        if segmentation_terms is not None:
+            for key in segmentation_totals:
+                segmentation_totals[key] += float(segmentation_terms[key].item()) * current_batch_size
+            segmentation_cases += current_batch_size
         y_true.extend(batch["label"].detach().cpu().tolist())
         y_prob.extend(output["prob"].detach().cpu().tolist())
         if "stage_stats" in output:
@@ -114,6 +155,11 @@ def run_epoch(model, loader, device, criterion=None, optimizer=None, grad_clip: 
 
     metrics = compute_binary_metrics(y_true, y_prob, threshold=threshold)
     metrics["loss"] = total_loss / max(len(loader.dataset), 1)
+    metrics["classification_loss"] = total_classification_loss / max(len(loader.dataset), 1)
+    if segmentation_cases > 0:
+        for key, value in segmentation_totals.items():
+            metrics[key] = value / segmentation_cases
+        metrics["lambda_seg"] = lambda_seg
     metrics = _append_optional_stats(metrics, stage_stats)
     metrics = _append_classifier_info(metrics, model)
     return metrics
@@ -129,7 +175,7 @@ def collect_predictions(model, loader, device, branch_override=None, explain_num
     exported = 0
     for batch in tqdm(loader, desc="evaluate", leave=False):
         batch = move_batch_to_device(batch, device)
-        output = model(batch, branch_override=branch_override)
+        output = model(batch, branch_override=branch_override, return_segmentation=False)
         probs = output["prob"].detach().cpu().numpy()
         attn = output["roi_attention"].detach().cpu().numpy()
         labels = batch["label"].detach().cpu().numpy()
@@ -265,12 +311,12 @@ def roi_drop_analysis(model, loader, device, roi_names: Sequence[str]) -> np.nda
     deltas = []
     for batch in tqdm(loader, desc="roi_drop", leave=False):
         batch = move_batch_to_device(batch, device)
-        base = model(batch)["prob"]
+        base = model(batch, return_segmentation=False)["prob"]
         batch_deltas = []
         for roi_idx in range(len(roi_names)):
             drop_mask = torch.ones_like(batch["roi_valid"])
             drop_mask[:, roi_idx] = 0.0
-            dropped = model(batch, roi_drop_mask=drop_mask)["prob"]
+            dropped = model(batch, roi_drop_mask=drop_mask, return_segmentation=False)["prob"]
             batch_deltas.append((base - dropped).detach().cpu().numpy())
         batch_deltas = np.stack(batch_deltas, axis=1)
         deltas.append(batch_deltas)

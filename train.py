@@ -91,6 +91,14 @@ def main():
     loss_type = str(loss_cfg.get("loss_type", "weighted_ce" if use_balanced_loss else "ce"))
     criterion = nn.CrossEntropyLoss(weight=class_weights if use_balanced_loss and loss_type in {"weighted_ce", "ce"} else None)
     optimizer = AdamW(model.parameters(), lr=config["train"]["lr"], weight_decay=config["train"].get("weight_decay", 0.0))
+    auxiliary_cfg = config["model"].get("auxiliary_segmentation", {})
+    segmentation_config = {
+        "enabled": bool(auxiliary_cfg.get("enabled", False)),
+        "lambda_seg": float(config["train"].get("lambda_seg", 0.0)),
+        "seg_bce_weight": float(config["train"].get("seg_bce_weight", 0.5)),
+        "seg_dice_weight": float(config["train"].get("seg_dice_weight", 0.5)),
+    }
+    logger.info("Auxiliary WT segmentation: %s", json.dumps(segmentation_config, ensure_ascii=False))
 
     best_score = -1.0
     bad_epochs = 0
@@ -109,6 +117,7 @@ def main():
             grad_clip=config["train"].get("grad_clip", 0.0),
             threshold=config["eval"].get("threshold", 0.5),
             desc=f"train {epoch}",
+            segmentation_config=segmentation_config,
         )
         val_metrics = run_epoch(
             model,
@@ -118,6 +127,7 @@ def main():
             optimizer=None,
             threshold=config["eval"].get("threshold", 0.5),
             desc=f"val {epoch}",
+            segmentation_config=segmentation_config,
         )
         score = val_metrics.get(metric_name, float("nan"))
         if score != score:
@@ -140,7 +150,7 @@ def main():
     if config["train"].get("enable_targeted_finetune", False):
         base_checkpoint = torch.load(ckpt_dir / "best.pt", map_location=device)
         torch.save(base_checkpoint, ckpt_dir / "base_best.pt")
-        model.load_state_dict(base_checkpoint["model"])
+        model.load_checkpoint_state_dict(base_checkpoint["model"])
         train_ds.combo_mode = config["train"].get("fine_tune_sampling_mode", "targeted_no_t1ce")
         fine_tune_epochs = int(config["train"].get("fine_tune_epochs", 8))
         fine_tune_lr = float(config["train"]["lr"]) * float(config["train"].get("fine_tune_lr_scale", 0.1))
@@ -179,6 +189,7 @@ def main():
                 grad_clip=config["train"].get("grad_clip", 0.0),
                 threshold=config["eval"].get("threshold", 0.5),
                 desc=f"finetune {ft_epoch}",
+                segmentation_config=segmentation_config,
             )
             val_metrics = run_epoch(
                 model,
@@ -188,6 +199,7 @@ def main():
                 optimizer=None,
                 threshold=config["eval"].get("threshold", 0.5),
                 desc=f"finetune-val {ft_epoch}",
+                segmentation_config=segmentation_config,
             )
             score = val_metrics.get(metric_name, float("nan"))
             if score != score:
@@ -221,7 +233,7 @@ def main():
 
     checkpoint_path = ckpt_dir / "best.pt"
     checkpoint = torch.load(checkpoint_path, map_location=device)
-    model.load_state_dict(checkpoint["model"])
+    model.load_checkpoint_state_dict(checkpoint["model"])
 
     calibration_cfg = config.get("calibration", {})
     calibrated_threshold = float(config["eval"].get("threshold", calibration_cfg.get("default_threshold", 0.5)))
