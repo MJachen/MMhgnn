@@ -1,0 +1,21 @@
+base_config: ../default.yaml
+
+output_dir: outputs/aux_wt_seg/lambda_010
+
+data:
+  split_json: outputs/aux_wt_seg/shared_splits.json
+
+model:
+  auxiliary_segmentation:
+    enabled: true
+    target: wt
+    projection_channels: 32
+    hidden_channels: [32, 16]
+    output_channels: 1
+    fusion: masked_mean
+    group_norm_groups: 8
+
+train:
+  lambda_seg: 0.1
+  seg_bce_weight: 0.5
+  seg_dice_weight: 0.5
