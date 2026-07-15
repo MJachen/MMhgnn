@@ -1,0 +1,10 @@
+base_config: aux_wt_seg_lambda005.yaml
+
+# The launcher overrides output_dir per seed. This fallback remains seed-specific
+# so an accidental direct invocation cannot overwrite the original lambda_005 run.
+output_dir: outputs/aux_wt_seg_multiseed/lambda_005/seed_42
+
+data:
+  # Tracked, immutable split shared by all seeds. Only model initialization,
+  # shuffling, and stochastic training behavior change across runs.
+  split_json: configs/splits/aux_wt_seg_shared_seed42.json

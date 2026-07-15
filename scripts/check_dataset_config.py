@@ -19,6 +19,11 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Check dataset paths and file patterns from a YAML config.")
     parser.add_argument("--config", type=str, required=True)
     parser.add_argument("--show", type=int, default=5, help="Number of example cases to print.")
+    parser.add_argument(
+        "--require-split",
+        action="store_true",
+        help="Fail unless data.split_json exists and is disjoint, duplicate-free, and fully represented in the dataset.",
+    )
     return parser.parse_args()
 
 
@@ -95,6 +100,60 @@ def scan_configured_cases(data_cfg):
     return valid, skipped
 
 
+def validate_split_file(data_cfg, records, require_split: bool = False):
+    split_value = data_cfg.get("split_json")
+    if not split_value:
+        if require_split:
+            raise ValueError("data.split_json is required for this experiment but is not configured.")
+        return {"configured": False, "exists": False}
+
+    split_path = Path(split_value)
+    if not split_path.is_absolute():
+        split_path = PROJECT_ROOT / split_path
+    split_path = split_path.resolve()
+    if not split_path.exists():
+        if require_split:
+            raise FileNotFoundError(f"Required split file does not exist: {split_path}")
+        return {"configured": True, "exists": False, "path": str(split_path)}
+
+    with split_path.open("r", encoding="utf-8") as handle:
+        split_data = json.load(handle)
+    required_keys = {"train", "val", "test"}
+    if set(split_data) != required_keys:
+        raise ValueError(f"Split file must contain exactly {sorted(required_keys)}, got {sorted(split_data)}")
+
+    record_ids = {record["case_id"] for record in records}
+    duplicate_ids = {
+        split_name: sorted(case_id for case_id, count in Counter(case_ids).items() if count > 1)
+        for split_name, case_ids in split_data.items()
+    }
+    overlaps = {
+        "train_val": sorted(set(split_data["train"]) & set(split_data["val"])),
+        "train_test": sorted(set(split_data["train"]) & set(split_data["test"])),
+        "val_test": sorted(set(split_data["val"]) & set(split_data["test"])),
+    }
+    missing_ids = {
+        split_name: sorted(set(case_ids) - record_ids)
+        for split_name, case_ids in split_data.items()
+    }
+    if any(duplicate_ids.values()) or any(overlaps.values()) or any(missing_ids.values()):
+        raise ValueError(
+            "Invalid fixed split: "
+            f"duplicates={duplicate_ids}, overlaps={overlaps}, missing_ids={missing_ids}"
+        )
+
+    return {
+        "configured": True,
+        "exists": True,
+        "path": str(split_path),
+        "counts": {split_name: len(case_ids) for split_name, case_ids in split_data.items()},
+        "total_unique_cases": len(set().union(*(set(case_ids) for case_ids in split_data.values()))),
+        "duplicates": duplicate_ids,
+        "overlaps": overlaps,
+        "missing_ids": missing_ids,
+    }
+
+
 def main():
     args = parse_args()
     config = load_config(args.config)
@@ -104,6 +163,7 @@ def main():
         raise RuntimeError("No valid cases found. Check data_root, label_xlsx, file patterns, and tumor mask source.")
 
     label_counts = Counter(record["label"] for record in records)
+    split_check = validate_split_file(data_cfg, records, require_split=args.require_split)
     payload = {
         "config": str(Path(args.config)),
         "data_root": data_cfg["data_root"],
@@ -113,6 +173,7 @@ def main():
         "num_valid_cases": len(records),
         "num_skipped_cases": len(skipped),
         "label_counts": dict(sorted(label_counts.items())),
+        "split_check": split_check,
         "examples": [
             {
                 "case_id": record["case_id"],
