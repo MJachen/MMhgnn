@@ -1,0 +1,6 @@
+base_config: aux_wt_seg_lambda000.yaml
+
+output_dir: outputs/aux_wt_seg_multiseed/lambda_000/seed_42
+
+data:
+  split_json: configs/splits/aux_wt_seg_shared_seed42.json

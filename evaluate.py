@@ -49,7 +49,7 @@ def main():
         logger.info("Mask-aware classifier: %s", json.dumps(model.get_classifier_info(), ensure_ascii=False))
 
     checkpoint = torch.load(args.checkpoint, map_location=device)
-    model.load_state_dict(checkpoint["model"])
+    model.load_checkpoint_state_dict(checkpoint["model"])
     model.eval()
     calibration_result = checkpoint.get("threshold_calibration", {})
     threshold = float(checkpoint.get("calibrated_threshold", config.get("calibration", {}).get("default_threshold", config["eval"].get("threshold", 0.5))))

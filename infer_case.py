@@ -76,7 +76,7 @@ def main():
 
     model = HybridHypergraphClassifier(config).to(device)
     checkpoint = torch.load(args.checkpoint, map_location=device)
-    model.load_state_dict(checkpoint["model"])
+    model.load_checkpoint_state_dict(checkpoint["model"])
     model.eval()
     calibration_result = checkpoint.get("threshold_calibration", {})
 
@@ -90,7 +90,7 @@ def main():
     batch = move_batch_to_device(batch, device)
 
     with torch.no_grad():
-        output = model(batch)
+        output = model(batch, return_segmentation=False)
     prob = float(output["prob"][0].item())
     pred = int(prob >= threshold)
     roi_attn = output["roi_attention"][0].detach().cpu().numpy()

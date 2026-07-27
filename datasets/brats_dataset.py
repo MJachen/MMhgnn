@@ -282,6 +282,8 @@ class BraTSClassificationDataset(Dataset):
         self.curriculum_config = {}
         self.explicit_combo = tuple(explicit_combo) if explicit_combo else None
         self.all_combos = get_all_modality_combinations(self.all_modalities)
+        self.balanced_combo_order = list(self.all_combos)
+        self._refresh_balanced_combo_order()
         self.q_core = q_core
         self.peri_inner_radius = peri_inner_radius
         self.peri_outer_radius = peri_outer_radius
@@ -300,6 +302,18 @@ class BraTSClassificationDataset(Dataset):
             self.curriculum_config = dict(curriculum_config)
         # Make curriculum sampling reproducible while still changing by epoch.
         self.random.seed(self.random_seed + self.current_epoch * 9973)
+        self._refresh_balanced_combo_order()
+
+    def _refresh_balanced_combo_order(self) -> None:
+        """Create a deterministic epoch-specific permutation of all non-empty combos."""
+        self.balanced_combo_order = list(self.all_combos)
+        epoch_random = random.Random(self.random_seed + self.current_epoch * 9973)
+        epoch_random.shuffle(self.balanced_combo_order)
+
+    def _balanced_combo_for_index(self, index: int) -> Tuple[str, ...]:
+        if not self.balanced_combo_order:
+            raise RuntimeError("balanced_all_combos requires at least one non-empty modality combination.")
+        return tuple(self.balanced_combo_order[int(index) % len(self.balanced_combo_order)])
 
     def _combos_by_visible_count(self, visible_count: int) -> List[Tuple[str, ...]]:
         return [tuple(c) for c in itertools.combinations(self.all_modalities, visible_count)]
@@ -365,11 +379,15 @@ class BraTSClassificationDataset(Dataset):
                 return combo
         return tuple(self.all_modalities)
 
-    def _choose_combo(self) -> Tuple[str, ...]:
+    def _choose_combo(self, index: int | None = None) -> Tuple[str, ...]:
         if self.explicit_combo is not None:
             return self.explicit_combo
         if self.combo_mode in {"full_modality_train", "fixed_combo"}:
             return self.fixed_combo
+        if self.combo_mode == "balanced_all_combos":
+            if index is None:
+                raise ValueError("balanced_all_combos requires a dataset index.")
+            return self._balanced_combo_for_index(index)
         if self.combo_mode == "missing_curriculum_train":
             return self._sample_curriculum_combo()
         if self.combo_mode == "targeted_no_t1ce":
@@ -387,7 +405,7 @@ class BraTSClassificationDataset(Dataset):
 
     def __getitem__(self, index: int):
         record = self.records[index]
-        combo = self._choose_combo()
+        combo = self._choose_combo(index)
 
         modality_full: Dict[str, np.ndarray] = {}
         for modality in self.all_modalities:

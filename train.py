@@ -12,9 +12,10 @@ from torch.optim import AdamW
 from datasets.brats_dataset import get_all_modality_combinations
 from models import HybridHypergraphClassifier
 from utils import load_config, set_seed, setup_logger
+from utils.b1_checkpoint import flatten_selection_summary, summarize_combo_metrics
 from utils.config import ensure_dir
 from utils.io import save_json
-from utils.metrics import build_drop_t1_ablation_report, calibrate_grouped_3way_t1ce_t1, calibrate_threshold, threshold_dispatch_for_combo, threshold_for_combo
+from utils.metrics import build_drop_t1_ablation_report, calibrate_grouped_3way_t1ce_t1, calibrate_threshold, compute_binary_metrics, threshold_dispatch_for_combo, threshold_for_combo
 from utils.runner import collect_predictions, evaluate_with_explanations, run_epoch
 from utils.training import build_dataloader, build_datasets, build_sampler, class_weights_from_records, dump_split_summary
 from utils.visualization import save_fusion_weight_history
@@ -38,6 +39,68 @@ def collect_validation_predictions_for_combos(model, config, device, combos):
         y_prob.extend(collected["y_prob"].tolist())
         combo_tags.extend(collected.get("combos", [tuple(combo)] * len(collected["y_true"])))
     return {"y_true": y_true, "y_prob": y_prob, "combos": combo_tags}
+
+
+def evaluate_b1_checkpoint_selection(
+    model,
+    val_ds,
+    val_loader,
+    config,
+    device,
+    cached_full_metrics=None,
+):
+    """Evaluate every non-empty modality combo and compute the B1 selection score."""
+    model.eval()
+    modalities = tuple(config["data"]["modalities"])
+    combos = get_all_modality_combinations(modalities)
+    threshold = float(
+        config.get("train", {})
+        .get("checkpoint_selection", {})
+        .get("threshold", config["eval"].get("threshold", 0.5))
+    )
+    original_combo = val_ds.explicit_combo
+    combo_metrics = {}
+    try:
+        for combo in combos:
+            name = "_".join(combo)
+            if tuple(combo) == modalities and cached_full_metrics is not None:
+                metrics = {
+                    key: float(cached_full_metrics.get(key, float("nan")))
+                    for key in ("acc", "auc", "f1", "sen", "spe", "bal_acc")
+                }
+            else:
+                val_ds.explicit_combo = tuple(combo)
+                collected = collect_predictions(model, val_loader, device)
+                metrics = compute_binary_metrics(
+                    collected["y_true"],
+                    collected["y_prob"],
+                    threshold=threshold,
+                )
+            combo_metrics[name] = metrics
+    finally:
+        val_ds.explicit_combo = original_combo
+
+    selection_cfg = config["train"].get("checkpoint_selection", {})
+    return summarize_combo_metrics(
+        combo_metrics,
+        modalities=modalities,
+        weights=selection_cfg.get("weights"),
+    )
+
+
+def persist_selection_history(selection_history, metrics_dir):
+    if not selection_history:
+        return
+    save_json(selection_history, metrics_dir / "checkpoint_selection_history.json")
+    rows = []
+    for item in selection_history:
+        row = {"phase": item["phase"], "epoch": item["epoch"]}
+        row.update(flatten_selection_summary(item["summary"]))
+        rows.append(row)
+    pd.DataFrame(rows).to_csv(
+        metrics_dir / "checkpoint_selection_history.csv",
+        index=False,
+    )
 
 
 def set_backbone_trainable(model, trainable: bool) -> None:
@@ -91,11 +154,40 @@ def main():
     loss_type = str(loss_cfg.get("loss_type", "weighted_ce" if use_balanced_loss else "ce"))
     criterion = nn.CrossEntropyLoss(weight=class_weights if use_balanced_loss and loss_type in {"weighted_ce", "ce"} else None)
     optimizer = AdamW(model.parameters(), lr=config["train"]["lr"], weight_decay=config["train"].get("weight_decay", 0.0))
+    auxiliary_cfg = config["model"].get("auxiliary_segmentation", {})
+    segmentation_config = {
+        "enabled": bool(auxiliary_cfg.get("enabled", False)),
+        "lambda_seg": float(config["train"].get("lambda_seg", 0.0)),
+        "seg_bce_weight": float(config["train"].get("seg_bce_weight", 0.5)),
+        "seg_dice_weight": float(config["train"].get("seg_dice_weight", 0.5)),
+    }
+    logger.info("Auxiliary WT segmentation: %s", json.dumps(segmentation_config, ensure_ascii=False))
 
     best_score = -1.0
     bad_epochs = 0
     history = []
     metric_name = config["train"].get("save_metric", "auc")
+    selection_cfg = config["train"].get("checkpoint_selection", {})
+    selection_enabled = bool(selection_cfg.get("enabled", False))
+    selection_history = []
+    checkpoint_metric_name = "b1_selection_score" if selection_enabled else metric_name
+    if selection_enabled:
+        logger.info(
+            "B1 checkpoint selection enabled | score=%s | groups=%s | threshold=%.3f",
+            json.dumps(
+                selection_cfg.get(
+                    "weights",
+                    {
+                        "macro_bal_acc": 0.5,
+                        "worst_group_bal_acc": 0.3,
+                        "full_bal_acc": 0.2,
+                    },
+                ),
+                ensure_ascii=False,
+            ),
+            "has_t1ce,no_t1ce_no_t1,no_t1ce_with_t1",
+            float(selection_cfg.get("threshold", config["eval"].get("threshold", 0.5))),
+        )
 
     for epoch in range(1, int(config["train"]["epochs"]) + 1):
         if hasattr(train_ds, "set_epoch"):
@@ -109,6 +201,7 @@ def main():
             grad_clip=config["train"].get("grad_clip", 0.0),
             threshold=config["eval"].get("threshold", 0.5),
             desc=f"train {epoch}",
+            segmentation_config=segmentation_config,
         )
         val_metrics = run_epoch(
             model,
@@ -118,19 +211,58 @@ def main():
             optimizer=None,
             threshold=config["eval"].get("threshold", 0.5),
             desc=f"val {epoch}",
+            segmentation_config=segmentation_config,
         )
-        score = val_metrics.get(metric_name, float("nan"))
-        if score != score:
-            score = val_metrics.get("bal_acc", 0.0)
+        selection_summary = None
+        if selection_enabled:
+            selection_summary = evaluate_b1_checkpoint_selection(
+                model,
+                val_ds,
+                val_loader,
+                config,
+                device,
+                cached_full_metrics=val_metrics,
+            )
+            score = float(selection_summary["selection_score"])
+            selection_history.append(
+                {"phase": "train", "epoch": epoch, "summary": selection_summary}
+            )
+            persist_selection_history(selection_history, metrics_dir)
+        else:
+            score = val_metrics.get(metric_name, float("nan"))
+            if score != score:
+                score = val_metrics.get("bal_acc", 0.0)
 
-        history.append({"epoch": epoch, "train": train_metrics, "val": val_metrics})
+        history_item = {"epoch": epoch, "train": train_metrics, "val": val_metrics}
+        if selection_summary is not None:
+            history_item["selection"] = selection_summary
+        history.append(history_item)
         logger.info("Epoch %d | train=%s | val=%s", epoch, json.dumps(train_metrics, ensure_ascii=False), json.dumps(val_metrics, ensure_ascii=False))
+        if selection_summary is not None:
+            logger.info(
+                "Epoch %d | B1 selection=%.4f | macro BA=%.4f | worst-group BA=%.4f | full BA=%.4f | groups=%s",
+                epoch,
+                score,
+                float(selection_summary["macro_bal_acc"]),
+                float(selection_summary["worst_group_bal_acc"]),
+                float(selection_summary["full_bal_acc"]),
+                json.dumps(selection_summary["group_bal_acc"], ensure_ascii=False),
+            )
 
         if score > best_score:
             best_score = score
             bad_epochs = 0
-            torch.save({"model": model.state_dict(), "config": config, "epoch": epoch, "score": score}, ckpt_dir / "best.pt")
-            logger.info("Saved new best checkpoint with %s=%.4f", metric_name, score)
+            checkpoint_payload = {
+                "model": model.state_dict(),
+                "config": config,
+                "epoch": epoch,
+                "score": score,
+                "selection_metric": checkpoint_metric_name,
+            }
+            if selection_summary is not None:
+                checkpoint_payload["checkpoint_selection"] = selection_summary
+            torch.save(checkpoint_payload, ckpt_dir / "best.pt")
+            logger.info("Saved new best checkpoint with %s=%.4f", checkpoint_metric_name, score)
         else:
             bad_epochs += 1
             if bad_epochs >= int(config["train"].get("early_stop_patience", 8)):
@@ -140,7 +272,7 @@ def main():
     if config["train"].get("enable_targeted_finetune", False):
         base_checkpoint = torch.load(ckpt_dir / "best.pt", map_location=device)
         torch.save(base_checkpoint, ckpt_dir / "base_best.pt")
-        model.load_state_dict(base_checkpoint["model"])
+        model.load_checkpoint_state_dict(base_checkpoint["model"])
         train_ds.combo_mode = config["train"].get("fine_tune_sampling_mode", "targeted_no_t1ce")
         fine_tune_epochs = int(config["train"].get("fine_tune_epochs", 8))
         fine_tune_lr = float(config["train"]["lr"]) * float(config["train"].get("fine_tune_lr_scale", 0.1))
@@ -179,6 +311,7 @@ def main():
                 grad_clip=config["train"].get("grad_clip", 0.0),
                 threshold=config["eval"].get("threshold", 0.5),
                 desc=f"finetune {ft_epoch}",
+                segmentation_config=segmentation_config,
             )
             val_metrics = run_epoch(
                 model,
@@ -188,16 +321,64 @@ def main():
                 optimizer=None,
                 threshold=config["eval"].get("threshold", 0.5),
                 desc=f"finetune-val {ft_epoch}",
+                segmentation_config=segmentation_config,
             )
-            score = val_metrics.get(metric_name, float("nan"))
-            if score != score:
-                score = val_metrics.get("bal_acc", 0.0)
-            history.append({"epoch": f"finetune_{ft_epoch}", "train": train_metrics, "val": val_metrics})
+            selection_summary = None
+            if selection_enabled:
+                selection_summary = evaluate_b1_checkpoint_selection(
+                    model,
+                    val_ds,
+                    val_loader,
+                    config,
+                    device,
+                    cached_full_metrics=val_metrics,
+                )
+                score = float(selection_summary["selection_score"])
+                selection_history.append(
+                    {
+                        "phase": "finetune",
+                        "epoch": ft_epoch,
+                        "summary": selection_summary,
+                    }
+                )
+                persist_selection_history(selection_history, metrics_dir)
+            else:
+                score = val_metrics.get(metric_name, float("nan"))
+                if score != score:
+                    score = val_metrics.get("bal_acc", 0.0)
+            history_item = {
+                "epoch": f"finetune_{ft_epoch}",
+                "train": train_metrics,
+                "val": val_metrics,
+            }
+            if selection_summary is not None:
+                history_item["selection"] = selection_summary
+            history.append(history_item)
             logger.info("Fine-tune epoch %d | train=%s | val=%s", ft_epoch, json.dumps(train_metrics, ensure_ascii=False), json.dumps(val_metrics, ensure_ascii=False))
+            if selection_summary is not None:
+                logger.info(
+                    "Fine-tune epoch %d | B1 selection=%.4f | macro BA=%.4f | worst-group BA=%.4f | full BA=%.4f | groups=%s",
+                    ft_epoch,
+                    score,
+                    float(selection_summary["macro_bal_acc"]),
+                    float(selection_summary["worst_group_bal_acc"]),
+                    float(selection_summary["full_bal_acc"]),
+                    json.dumps(selection_summary["group_bal_acc"], ensure_ascii=False),
+                )
             if score > fine_tune_best:
                 fine_tune_best = score
-                torch.save({"model": model.state_dict(), "config": config, "epoch": f"finetune_{ft_epoch}", "score": score, "stage": "targeted_finetune"}, ckpt_dir / "best.pt")
-                logger.info("Saved fine-tuned best checkpoint with %s=%.4f", metric_name, score)
+                checkpoint_payload = {
+                    "model": model.state_dict(),
+                    "config": config,
+                    "epoch": f"finetune_{ft_epoch}",
+                    "score": score,
+                    "stage": "targeted_finetune",
+                    "selection_metric": checkpoint_metric_name,
+                }
+                if selection_summary is not None:
+                    checkpoint_payload["checkpoint_selection"] = selection_summary
+                torch.save(checkpoint_payload, ckpt_dir / "best.pt")
+                logger.info("Saved fine-tuned best checkpoint with %s=%.4f", checkpoint_metric_name, score)
         if freeze_backbone:
             set_backbone_trainable(model, True)
         train_ds.combo_mode = config["train"].get("mode", "full_modality_train")
@@ -209,6 +390,9 @@ def main():
         for split_name in ["train", "val"]:
             for key, value in item[split_name].items():
                 row[f"{split_name}_{key}"] = value
+        if "selection" in item:
+            for key, value in flatten_selection_summary(item["selection"]).items():
+                row[f"selection_{key}"] = value
         history_rows.append(row)
     history_df = pd.DataFrame(history_rows)
     history_df.to_csv(metrics_dir / "train_history.csv", index=False)
@@ -221,7 +405,7 @@ def main():
 
     checkpoint_path = ckpt_dir / "best.pt"
     checkpoint = torch.load(checkpoint_path, map_location=device)
-    model.load_state_dict(checkpoint["model"])
+    model.load_checkpoint_state_dict(checkpoint["model"])
 
     calibration_cfg = config.get("calibration", {})
     calibrated_threshold = float(config["eval"].get("threshold", calibration_cfg.get("default_threshold", 0.5)))
