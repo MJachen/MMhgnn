@@ -168,9 +168,11 @@ def run_epoch(
 @torch.no_grad()
 def collect_predictions(model, loader, device, branch_override=None, explain_num_cases: int = 0):
     y_true, y_prob = [], []
+    logits_all = []
     roi_scores_all, stage_stats_all = [], []
     modality_gates_all = []
     combos_all = []
+    case_ids_all = []
     case_payloads = []
     exported = 0
     for batch in tqdm(loader, desc="evaluate", leave=False):
@@ -181,12 +183,14 @@ def collect_predictions(model, loader, device, branch_override=None, explain_num
         labels = batch["label"].detach().cpu().numpy()
         y_true.extend(labels.tolist())
         y_prob.extend(probs.tolist())
+        logits_all.extend(output["logits"].detach().cpu().numpy().tolist())
         roi_scores_all.extend(attn.tolist())
         if "stage_stats" in output:
             stage_stats_all.extend(output["stage_stats"].detach().cpu().tolist())
         if "modality_gates" in output:
             modality_gates_all.extend(output["modality_gates"].detach().cpu().tolist())
         combos_all.extend([tuple(c) for c in batch.get("combo", [])])
+        case_ids_all.extend([str(case_id) for case_id in batch.get("case_id", [])])
         if exported < explain_num_cases:
             batch_size = len(batch["case_id"])
             for i in range(batch_size):
@@ -203,10 +207,12 @@ def collect_predictions(model, loader, device, branch_override=None, explain_num
     return {
         "y_true": np.asarray(y_true, dtype=int),
         "y_prob": np.asarray(y_prob, dtype=float),
+        "logits": np.asarray(logits_all, dtype=float),
         "roi_scores": np.asarray(roi_scores_all, dtype=float),
         "stage_stats": np.asarray(stage_stats_all, dtype=float) if stage_stats_all else np.zeros((0, 3), dtype=float),
         "modality_gates": np.asarray(modality_gates_all, dtype=float) if modality_gates_all else np.zeros((0, 0, 0), dtype=float),
         "combos": combos_all,
+        "case_ids": case_ids_all,
         "case_payloads": case_payloads,
     }
 
@@ -247,6 +253,27 @@ def evaluate_with_explanations(
     mask_order = model.get_classifier_info().get("mask_order", []) if hasattr(model, "get_classifier_info") else []
     metrics = _append_gate_stats(metrics, modality_gates, roi_names, mask_order)
     save_metrics_files(metrics, output_dir)
+    prediction_rows = []
+    for index, (label, probability, prediction) in enumerate(
+        zip(y_true.tolist(), y_prob.tolist(), y_pred.tolist())
+    ):
+        combo = collected["combos"][index] if index < len(collected["combos"]) else ()
+        case_id = collected["case_ids"][index] if index < len(collected["case_ids"]) else ""
+        logits = collected["logits"][index]
+        prediction_rows.append(
+            {
+                "case_id": case_id,
+                "combo": "_".join(combo),
+                "y_true": int(label),
+                "logit_0": float(logits[0]),
+                "logit_1": float(logits[1]),
+                "y_prob": float(probability),
+                "y_pred": int(prediction),
+                "threshold_group": threshold_group,
+                "applied_threshold": float(threshold),
+            }
+        )
+    pd.DataFrame(prediction_rows).to_csv(output_dir / "predictions.csv", index=False)
 
     if modality_gates.size > 0 and hasattr(model, "get_classifier_info"):
         gate_rows = []

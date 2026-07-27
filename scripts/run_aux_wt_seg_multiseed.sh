@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Launch three independent training jobs on three physical GPUs while keeping
 # the subject split fixed. Override settings through environment variables:
-#   ARM=lambda_005 GPU_IDS=0,1,2 SEEDS=42,43,44 PYTHON_BIN=python bash scripts/run_aux_wt_seg_multiseed.sh
+#   ARM=b1 GPU_IDS=0,1,2 SEEDS=42,43,44 PYTHON_BIN=python bash scripts/run_aux_wt_seg_multiseed.sh
 
 ARM="${ARM:-lambda_005}"
 GPU_IDS_CSV="${GPU_IDS:-0,1,2}"
@@ -19,8 +19,11 @@ case "$ARM" in
   lambda_000)
     CONFIG="${CONFIG:-configs/experiments/aux_wt_seg_lambda000_multiseed.yaml}"
     ;;
+  b1)
+    CONFIG="${CONFIG:-configs/experiments/aux_wt_seg_b1_multiseed.yaml}"
+    ;;
   *)
-    echo "Unsupported ARM=$ARM; expected lambda_005 or lambda_000." >&2
+    echo "Unsupported ARM=$ARM; expected lambda_005, lambda_000, or b1." >&2
     exit 2
     ;;
 esac

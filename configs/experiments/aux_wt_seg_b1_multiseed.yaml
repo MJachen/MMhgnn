@@ -1,0 +1,27 @@
+base_config: aux_wt_seg_lambda005.yaml
+
+# B1: keep the auxiliary WT objective fixed at lambda=0.05, but expose every
+# non-empty modality combination during both training stages.
+output_dir: outputs/aux_wt_seg_multiseed/b1/seed_42
+
+data:
+  # Same immutable subject split as B0/lambda005, so paired seed comparisons
+  # change only the training protocol.
+  split_json: configs/splits/aux_wt_seg_shared_seed42.json
+
+train:
+  mode: balanced_all_combos
+  lambda_seg: 0.05
+  enable_targeted_finetune: true
+  fine_tune_sampling_mode: balanced_all_combos
+
+  # Model selection is based on missing-modality validation performance.
+  # worst_group_bal_acc is the minimum mean BA among:
+  # has_t1ce, no_t1ce_no_t1, and no_t1ce_with_t1.
+  checkpoint_selection:
+    enabled: true
+    threshold: 0.5
+    weights:
+      macro_bal_acc: 0.5
+      worst_group_bal_acc: 0.3
+      full_bal_acc: 0.2
