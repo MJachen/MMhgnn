@@ -13,7 +13,7 @@ from datasets.brats_dataset import get_all_modality_combinations
 from models import HybridHypergraphClassifier
 from utils import load_config, set_seed, setup_logger
 from utils.config import ensure_dir
-from utils.io import save_json
+from utils.io import load_json, save_json
 from utils.metrics import build_drop_t1_ablation_report, calibrate_grouped_3way_t1ce_t1, calibrate_threshold, threshold_dispatch_for_combo, threshold_for_combo
 from utils.runner import collect_predictions, evaluate_with_explanations, run_epoch
 from utils.training import build_dataloader, build_datasets, build_sampler, class_weights_from_records, dump_split_summary
@@ -21,10 +21,14 @@ from utils.visualization import save_fusion_weight_history
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="BraTS HGG/LGG hybrid hypergraph demo training")
+    parser = argparse.ArgumentParser(description="BraTS/UTSW hybrid hypergraph classification training")
     parser.add_argument("--config", type=str, default="configs/default.yaml")
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--output-dir", type=str, default=None)
+    parser.add_argument("--data-root", type=str, default=None)
+    parser.add_argument("--manifest-csv", type=str, default=None)
+    parser.add_argument("--split-json", type=str, default=None)
+    parser.add_argument("--resume", type=str, default=None)
     return parser.parse_args()
 
 
@@ -52,6 +56,44 @@ def select_device(device_name: str) -> torch.device:
     return torch.device("cpu")
 
 
+def split_provenance(splits):
+    return {
+        name: [
+            {"case_id": record.case_id, "patient_id": getattr(record, "patient_id", record.case_id), "label": int(record.label)}
+            for record in records
+        ]
+        for name, records in splits.items()
+    }
+
+
+def checkpoint_payload(model, optimizer, config, epoch, score, best_score, bad_epochs, history, splits, threshold_metadata=None):
+    fingerprint_path = config.get("data", {}).get("manifest_fingerprint_json")
+    manifest_fingerprint = None
+    if fingerprint_path and Path(fingerprint_path).is_file():
+        manifest_fingerprint = load_json(fingerprint_path).get("canonical_manifest_sha256")
+    return {
+        "model": model.state_dict(),
+        "optimizer": optimizer.state_dict(),
+        "config": config,
+        "epoch": int(epoch),
+        "score": float(score),
+        "best_score": float(best_score),
+        "bad_epochs": int(bad_epochs),
+        "history": history,
+        "seed": int(config["seed"]),
+        "canonical_manifest_sha256": manifest_fingerprint,
+        "split": split_provenance(splits),
+        "threshold_calibration": threshold_metadata
+        or {
+            "enabled": False,
+            "mode": "global",
+            "default_threshold": float(config.get("calibration", {}).get("default_threshold", 0.5)),
+            "calibrated_threshold": float(config["eval"].get("threshold", 0.5)),
+            "source": "fixed_config_before_validation_calibration",
+        },
+    }
+
+
 def main():
     args = parse_args()
     overrides = {}
@@ -59,6 +101,17 @@ def main():
         overrides["seed"] = args.seed
     if args.output_dir is not None:
         overrides["output_dir"] = args.output_dir
+    data_overrides = {}
+    if args.data_root is not None:
+        data_overrides["root"] = args.data_root
+    if args.manifest_csv is not None:
+        data_overrides["manifest_csv"] = args.manifest_csv
+    if args.split_json is not None:
+        data_overrides["split_json"] = args.split_json
+    if data_overrides:
+        overrides["data"] = data_overrides
+    if args.resume is not None:
+        overrides["train"] = {"resume": args.resume}
     config = load_config(args.config, overrides=overrides or None)
 
     set_seed(int(config["seed"]))
@@ -96,8 +149,24 @@ def main():
     bad_epochs = 0
     history = []
     metric_name = config["train"].get("save_metric", "auc")
+    start_epoch = 1
+    resume_path = config["train"].get("resume")
+    if resume_path:
+        resume_checkpoint = torch.load(resume_path, map_location=device)
+        model.load_state_dict(resume_checkpoint["model"])
+        optimizer.load_state_dict(resume_checkpoint["optimizer"])
+        if int(resume_checkpoint.get("seed", config["seed"])) != int(config["seed"]):
+            raise RuntimeError("Resume checkpoint seed does not match the requested run seed.")
+        saved_split = resume_checkpoint.get("split")
+        if saved_split and saved_split != split_provenance(splits):
+            raise RuntimeError("Resume checkpoint split does not match the current frozen split.")
+        start_epoch = int(resume_checkpoint["epoch"]) + 1
+        best_score = float(resume_checkpoint.get("best_score", resume_checkpoint.get("score", -1.0)))
+        bad_epochs = int(resume_checkpoint.get("bad_epochs", 0))
+        history = list(resume_checkpoint.get("history", []))
+        logger.info("Resumed training from %s at epoch %d", resume_path, start_epoch)
 
-    for epoch in range(1, int(config["train"]["epochs"]) + 1):
+    for epoch in range(start_epoch, int(config["train"]["epochs"]) + 1):
         if hasattr(train_ds, "set_epoch"):
             train_ds.set_epoch(epoch, int(config["train"]["epochs"]), config["train"])
         train_metrics = run_epoch(
@@ -126,16 +195,20 @@ def main():
         history.append({"epoch": epoch, "train": train_metrics, "val": val_metrics})
         logger.info("Epoch %d | train=%s | val=%s", epoch, json.dumps(train_metrics, ensure_ascii=False), json.dumps(val_metrics, ensure_ascii=False))
 
-        if score > best_score:
+        improved = score > best_score
+        if improved:
             best_score = score
             bad_epochs = 0
-            torch.save({"model": model.state_dict(), "config": config, "epoch": epoch, "score": score}, ckpt_dir / "best.pt")
-            logger.info("Saved new best checkpoint with %s=%.4f", metric_name, score)
         else:
             bad_epochs += 1
-            if bad_epochs >= int(config["train"].get("early_stop_patience", 8)):
-                logger.info("Early stopping triggered at epoch %d", epoch)
-                break
+        payload = checkpoint_payload(model, optimizer, config, epoch, score, best_score, bad_epochs, history, splits)
+        torch.save(payload, ckpt_dir / "last.pt")
+        if improved:
+            torch.save(payload, ckpt_dir / "best.pt")
+            logger.info("Saved new best checkpoint with %s=%.4f", metric_name, score)
+        if bad_epochs >= int(config["train"].get("early_stop_patience", 8)):
+            logger.info("Early stopping triggered at epoch %d", epoch)
+            break
 
     if config["train"].get("enable_targeted_finetune", False):
         base_checkpoint = torch.load(ckpt_dir / "best.pt", map_location=device)
@@ -258,16 +331,22 @@ def main():
         calibrated_threshold = float(calibration_result.get("threshold", calibration_result.get("calibrated_threshold", calibrated_threshold)))
         calibration_result["calibrated_threshold"] = calibrated_threshold
         calibration_result["calibration_metric"] = calibration_result.get("metric", calibration_cfg.get("threshold_metric", "balanced_accuracy"))
-        checkpoint["calibrated_threshold"] = calibrated_threshold
-        checkpoint["threshold_calibration"] = calibration_result
-        checkpoint["mask_aware_classifier"] = model.get_classifier_info() if hasattr(model, "get_classifier_info") else {}
-        checkpoint["targeted_finetune"] = {
-            "enabled": bool(config["train"].get("enable_targeted_finetune", False)),
-            "fine_tune_epochs": int(config["train"].get("fine_tune_epochs", 0)),
-            "fine_tune_lr_scale": float(config["train"].get("fine_tune_lr_scale", 0.1)),
-            "fine_tune_sampling_mode": config["train"].get("fine_tune_sampling_mode", "targeted_no_t1ce"),
-        }
-        torch.save(checkpoint, checkpoint_path)
+    checkpoint["calibrated_threshold"] = calibrated_threshold
+    checkpoint["threshold_calibration"] = calibration_result
+    checkpoint["mask_aware_classifier"] = model.get_classifier_info() if hasattr(model, "get_classifier_info") else {}
+    checkpoint["targeted_finetune"] = {
+        "enabled": bool(config["train"].get("enable_targeted_finetune", False)),
+        "fine_tune_epochs": int(config["train"].get("fine_tune_epochs", 0)),
+        "fine_tune_lr_scale": float(config["train"].get("fine_tune_lr_scale", 0.1)),
+        "fine_tune_sampling_mode": config["train"].get("fine_tune_sampling_mode", "targeted_no_t1ce"),
+    }
+    torch.save(checkpoint, checkpoint_path)
+    last_checkpoint_path = ckpt_dir / "last.pt"
+    if last_checkpoint_path.exists():
+        last_checkpoint = torch.load(last_checkpoint_path, map_location="cpu")
+        last_checkpoint["calibrated_threshold"] = calibrated_threshold
+        last_checkpoint["threshold_calibration"] = calibration_result
+        torch.save(last_checkpoint, last_checkpoint_path)
     if calibration_result.get("fallback_info"):
         for group_name, info in calibration_result["fallback_info"].items():
             logger.warning("Calibration fallback | group=%s | reason=%s | applied_threshold=%.4f | target=%s", group_name, info.get("reason"), float(info.get("applied_threshold", calibrated_threshold)), info.get("fallback_target", ""))
@@ -305,6 +384,7 @@ def main():
             explain_num_cases=config["eval"].get("explain_num_cases", 3),
             roi_drop_enabled=config["eval"].get("roi_drop_enabled", True),
             edge_type_drop_enabled=config["eval"].get("edge_type_drop_enabled", True),
+            class_names=config["eval"].get("class_names"),
         )
         all_test_metrics[combo_name] = metrics
         test_rows.append({"combo": combo_name, "threshold_group": threshold_dispatch["threshold_group"], "applied_threshold": threshold_dispatch["applied_threshold"], **metrics})

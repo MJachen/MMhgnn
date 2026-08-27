@@ -18,12 +18,15 @@ from utils.training import build_dataloader, build_datasets
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="BraTS HGG/LGG hybrid hypergraph demo evaluation")
+    parser = argparse.ArgumentParser(description="BraTS/UTSW hybrid hypergraph evaluation")
     parser.add_argument("--config", type=str, default="configs/default.yaml")
     parser.add_argument("--checkpoint", type=str, required=True)
     parser.add_argument("--combo", nargs="*", default=None)
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--output-dir", type=str, default=None)
+    parser.add_argument("--data-root", type=str, default=None)
+    parser.add_argument("--manifest-csv", type=str, default=None)
+    parser.add_argument("--split-json", type=str, default=None)
     return parser.parse_args()
 
 
@@ -40,6 +43,15 @@ def main():
         overrides["seed"] = args.seed
     if args.output_dir is not None:
         overrides["output_dir"] = args.output_dir
+    data_overrides = {}
+    if args.data_root is not None:
+        data_overrides["root"] = args.data_root
+    if args.manifest_csv is not None:
+        data_overrides["manifest_csv"] = args.manifest_csv
+    if args.split_json is not None:
+        data_overrides["split_json"] = args.split_json
+    if data_overrides:
+        overrides["data"] = data_overrides
     config = load_config(args.config, overrides=overrides or None)
     set_seed(int(config["seed"]))
     logger = setup_logger(config.get("logging", {}).get("level", "INFO"))
@@ -75,6 +87,7 @@ def main():
             explain_num_cases=config["eval"].get("explain_num_cases", 3),
             roi_drop_enabled=config["eval"].get("roi_drop_enabled", True),
             edge_type_drop_enabled=config["eval"].get("edge_type_drop_enabled", True),
+            class_names=config["eval"].get("class_names"),
         )
         all_metrics[combo_name] = metrics
         rows.append({"combo": combo_name, "threshold_group": threshold_dispatch["threshold_group"], "applied_threshold": threshold_dispatch["applied_threshold"], **metrics})

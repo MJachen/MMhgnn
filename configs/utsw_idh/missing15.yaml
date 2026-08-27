@@ -1,0 +1,21 @@
+base_config: "server_base.yaml"
+
+output_dir: outputs/utsw_idh/missing15_seed42
+
+data:
+  split_json: splits/utsw_idh/utsw_idh_debug_split.json
+  allow_subset_split: false
+
+# Evaluation-only: requires a completed full-baseline checkpoint.
+train:
+  mode: full_modality_train
+  fixed_combo: [t2, t1ce, t1, flair]
+  batch_size: 1
+
+calibration:
+  enable_threshold_calibration: false
+  threshold_mode: global
+
+eval:
+  test_all_combos: true
+  test_all_combos_when_random_missing: false

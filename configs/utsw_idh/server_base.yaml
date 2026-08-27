@@ -1,0 +1,70 @@
+base_config: "../default.yaml"
+
+seed: 42
+output_dir: outputs/utsw_idh/server_run
+
+data:
+  dataset_name: utsw_idh
+  root: null
+  manifest_csv: metadata/utsw_idh_manifest.csv
+  manifest_fingerprint_json: metadata/utsw_idh_manifest_fingerprint.json
+  split_json: splits/utsw_idh/utsw_idh_debug_split.json
+  modalities: [t2, t1ce, t1, flair]
+  target_shape: null
+  crop_mode: full
+  bbox_margin: 6
+  num_workers: 0
+  tumor_mask_source: seg
+  mri_source_version: non_ants
+  segmentation_source: FeTS
+  allow_subset_split: false
+
+train:
+  mode: full_modality_train
+  fixed_combo: [t2, t1ce, t1, flair]
+  batch_size: 1
+  lr: 0.0005
+  weight_decay: 0.0001
+  device: cuda
+  weighted_ce: true
+  weighted_sampler: false
+  grad_clip: 5.0
+  save_metric: bal_acc
+  enable_targeted_finetune: false
+  resume: null
+
+loss:
+  loss_type: weighted_ce
+  use_class_balanced_loss: true
+  class_balance_mode: inverse_frequency_train_split_only
+
+calibration:
+  enable_threshold_calibration: false
+  threshold_metric: balanced_accuracy
+  threshold_mode: global
+  default_threshold: 0.5
+
+graph:
+  use_prototype_nodes: false
+  use_prototype_edges: false
+  num_nodes: 5
+  num_hyperedges: 5
+
+fusion:
+  no_t1ce_t1_penalty: 0.0
+
+model:
+  allow_full_resolution_input: true
+
+eval:
+  threshold: 0.5
+  class_names: [IDH-WT(0), IDH-mut(1)]
+  explain_num_cases: 0
+  save_confusion_matrix: true
+  edge_type_drop_enabled: false
+  roi_drop_enabled: false
+  test_all_combos: false
+  test_all_combos_when_random_missing: false
+
+test:
+  enable_drop_t1_inference_ablation: false

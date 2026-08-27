@@ -1,0 +1,36 @@
+{
+  "dataset": "utsw_idh",
+  "purpose": "server_pipeline_smoke_only",
+  "seed": 42,
+  "patient_id_source": "Subject ID",
+  "canonical_manifest_sha256": "8e88daca748196fa3d63324c5ecc188e76b203965843ad87c625be0b4b1d125a",
+  "train": [
+    "BT0187",
+    "BT0468"
+  ],
+  "val": [
+    "BT0129",
+    "BT1243"
+  ],
+  "test": [
+    "BT0086",
+    "BT0221"
+  ],
+  "counts": {
+    "train": {
+      "cases": 2,
+      "idh_wildtype": 1,
+      "idh_mutant": 1
+    },
+    "val": {
+      "cases": 2,
+      "idh_wildtype": 1,
+      "idh_mutant": 1
+    },
+    "test": {
+      "cases": 2,
+      "idh_wildtype": 1,
+      "idh_mutant": 1
+    }
+  }
+}

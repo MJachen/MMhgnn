@@ -10,30 +10,55 @@ from torch.utils.data import DataLoader, WeightedRandomSampler
 from torch.utils.data._utils.collate import default_collate
 
 from datasets.brats_dataset import BraTSClassificationDataset, create_data_splits, scan_cases
-from utils.io import save_json
+from datasets.utsw_dataset import UTSWClassificationDataset, load_utsw_records, split_utsw_records
+from utils.io import load_json, save_json
 
 
 def build_datasets(config: Dict, explicit_eval_combo: Sequence[str] | None = None):
     data_cfg = config["data"]
     train_cfg = config["train"]
     model_cfg = config["model"]
-    records = scan_cases(
-        data_root=data_cfg["data_root"],
-        label_xlsx=data_cfg["label_xlsx"],
-        case_id_col=data_cfg["case_id_col"],
-        label_col=data_cfg["label_col"],
-        modalities=data_cfg.get("modalities"),
-        image_filename_pattern=data_cfg.get("image_filename_pattern", "{case_id}_{mod}.nii.gz"),
-        seg_filename_pattern=data_cfg.get("seg_filename_pattern", "{case_id}_seg.nii.gz"),
-        mask_filename_pattern=data_cfg.get("mask_filename_pattern"),
-        tumor_mask_source=data_cfg.get("tumor_mask_source", "seg"),
-        case_id_col_index=data_cfg.get("case_id_col_index"),
-        label_col_index=data_cfg.get("label_col_index"),
-    )
+    dataset_name = str(data_cfg.get("dataset_name", "brats")).casefold()
     split_json = data_cfg.get("split_json")
-    if split_json is None:
-        split_json = str(Path(config["output_dir"]) / "splits.json")
-    splits = create_data_splits(records, tuple(data_cfg["split_ratio"]), config["seed"], split_json=split_json)
+    if dataset_name == "utsw_idh":
+        if not split_json:
+            raise ValueError("UTSW requires an explicit frozen split_json.")
+        data_root = data_cfg.get("root", data_cfg.get("data_root"))
+        if not data_root:
+            raise ValueError("UTSW data.root must be provided by config or --data-root.")
+        records = load_utsw_records(
+            data_cfg["manifest_csv"],
+            data_root,
+            fingerprint_json=data_cfg.get("manifest_fingerprint_json"),
+        )
+        expected_fingerprint = None
+        if data_cfg.get("manifest_fingerprint_json"):
+            expected_fingerprint = load_json(data_cfg["manifest_fingerprint_json"])["canonical_manifest_sha256"]
+        splits = split_utsw_records(
+            records,
+            split_json,
+            require_full_cohort=not bool(data_cfg.get("allow_subset_split", False)),
+            expected_manifest_fingerprint=expected_fingerprint,
+        )
+        dataset_class = UTSWClassificationDataset
+    else:
+        records = scan_cases(
+            data_root=data_cfg["data_root"],
+            label_xlsx=data_cfg["label_xlsx"],
+            case_id_col=data_cfg["case_id_col"],
+            label_col=data_cfg["label_col"],
+            modalities=data_cfg.get("modalities"),
+            image_filename_pattern=data_cfg.get("image_filename_pattern", "{case_id}_{mod}.nii.gz"),
+            seg_filename_pattern=data_cfg.get("seg_filename_pattern", "{case_id}_seg.nii.gz"),
+            mask_filename_pattern=data_cfg.get("mask_filename_pattern"),
+            tumor_mask_source=data_cfg.get("tumor_mask_source", "seg"),
+            case_id_col_index=data_cfg.get("case_id_col_index"),
+            label_col_index=data_cfg.get("label_col_index"),
+        )
+        if split_json is None:
+            split_json = str(Path(config["output_dir"]) / "splits.json")
+        splits = create_data_splits(records, tuple(data_cfg["split_ratio"]), config["seed"], split_json=split_json)
+        dataset_class = BraTSClassificationDataset
 
     dataset_kwargs = dict(
         target_shape=data_cfg.get("target_shape"),
@@ -48,14 +73,14 @@ def build_datasets(config: Dict, explicit_eval_combo: Sequence[str] | None = Non
         allow_full_resolution_input=bool(model_cfg.get("allow_full_resolution_input", False)),
         tumor_mask_source=data_cfg.get("tumor_mask_source", "seg"),
     )
-    train_ds = BraTSClassificationDataset(splits["train"], combo_mode=train_cfg["mode"], **dataset_kwargs)
-    val_ds = BraTSClassificationDataset(
+    train_ds = dataset_class(splits["train"], combo_mode=train_cfg["mode"], **dataset_kwargs)
+    val_ds = dataset_class(
         splits["val"],
         combo_mode="fixed_combo",
         explicit_combo=explicit_eval_combo or train_cfg.get("fixed_combo", data_cfg["modalities"]),
         **dataset_kwargs,
     )
-    test_ds = BraTSClassificationDataset(
+    test_ds = dataset_class(
         splits["test"],
         combo_mode="fixed_combo",
         explicit_combo=explicit_eval_combo or train_cfg.get("fixed_combo", data_cfg["modalities"]),
@@ -88,7 +113,7 @@ def brats_collate_fn(batch):
     collated = {}
     for key in batch[0].keys():
         values = [item[key] for item in batch]
-        if key in {"case_id", "combo"}:
+        if key in {"case_id", "patient_id", "combo"}:
             collated[key] = values
         elif torch.is_tensor(values[0]) and values[0].dim() >= 3:
             collated[key] = _pad_tensor_list(values)

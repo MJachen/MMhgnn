@@ -1,0 +1,52 @@
+{
+  "data_root": "runtime-configured",
+  "geometry_qc_csv": "metadata/utsw_geometry_qc.csv",
+  "mri_source_version": "non_ants",
+  "segmentation_source": "FeTS",
+  "label_mapping": {
+    "IDH-wildtype": 0,
+    "IDH-mutant": 1
+  },
+  "raw_case_directories": 625,
+  "metadata_rows": 625,
+  "metadata_unique_subjects": 625,
+  "metadata_with_normalized_idh": 622,
+  "idh_wildtype_raw": 446,
+  "idh_mutant_raw": 176,
+  "idh_unknown_or_excluded": 3,
+  "four_mri_complete_cases": 625,
+  "segmentation_present_cases": 625,
+  "geometry_qc_pass_cases": 621,
+  "geometry_qc_fail_cases": 4,
+  "eligible_cases": 618,
+  "eligible_idh_wildtype": 442,
+  "eligible_idh_mutant": 176,
+  "excluded_cases": 7,
+  "metadata_sha256": "40f72a75544cdc14e90619f4f455c867676a1081efd869443ccc6f28dc59fe83",
+  "geometry_qc_sha256": "c4a271fec8d1c83e8fd343217ee87136bff1667fcd8b3f2754e02ae5819df1d8",
+  "manifest_sha256": "c015d7b9c11d6ab81653f300779bf36642a0a8b9684a5bc8115ac8ff90173837",
+  "patient_id_note": "No separate patient identifier is present in the supplied CSV; Subject ID is used as patient_id.",
+  "debug_split": {
+    "train": {
+      "cases": 494,
+      "idh_wildtype": 353,
+      "idh_mutant": 141
+    },
+    "val": {
+      "cases": 62,
+      "idh_wildtype": 44,
+      "idh_mutant": 18
+    },
+    "test": {
+      "cases": 62,
+      "idh_wildtype": 45,
+      "idh_mutant": 17
+    }
+  },
+  "debug_split_seed": 42,
+  "debug_split_json": "splits/utsw_idh/utsw_idh_debug_split.json",
+  "canonical_manifest_sha256": "8e88daca748196fa3d63324c5ecc188e76b203965843ad87c625be0b4b1d125a",
+  "manifest_fingerprint_json": "metadata/utsw_idh_manifest_fingerprint.json",
+  "file_inventory_csv": "metadata/utsw_idh_file_inventory.csv",
+  "file_inventory_canonical_sha256": "a001278ae7e69631db472884ae1f85ab713c7d3c57c9b9c9ca897934371ec8fd"
+}

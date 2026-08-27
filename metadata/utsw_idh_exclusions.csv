@@ -1,0 +1,8 @@
+case_id,original_idh_label,geometry_qc_status,exclusion_reason
+BT0107,wild type,fail,geometry_qc_failed:segmentation_outside_brain
+BT0234,NA,pass,excluded_idh_na
+BT0235,NA,pass,excluded_idh_na
+BT0288,NA,pass,excluded_idh_na
+BT0926,wild type,fail,geometry_qc_failed:empty_segmentation;foreground_overlap_not_computable
+BT1016,wild type,fail,geometry_qc_failed:empty_segmentation;foreground_overlap_not_computable
+BT1090,wild type,fail,geometry_qc_failed:empty_segmentation;foreground_overlap_not_computable

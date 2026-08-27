@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "dataset": "utsw_idh",
+  "label_mapping": {
+    "0": "IDH-WT",
+    "1": "IDH-mutant"
+  },
+  "eligible_cases": 618,
+  "eligible_idh_wildtype": 442,
+  "eligible_idh_mutant": 176,
+  "mri_source_version": "non_ants",
+  "segmentation_source": "FeTS",
+  "fingerprint_columns": [
+    "case_id",
+    "patient_id",
+    "normalized_idh_label",
+    "t2_path",
+    "t1ce_path",
+    "t1_path",
+    "flair_path",
+    "segmentation_path",
+    "mri_source_version",
+    "segmentation_source",
+    "geometry_qc_status",
+    "eligible",
+    "exclusion_reason"
+  ],
+  "canonical_manifest_sha256": "8e88daca748196fa3d63324c5ecc188e76b203965843ad87c625be0b4b1d125a",
+  "manifest_file_sha256": "c015d7b9c11d6ab81653f300779bf36642a0a8b9684a5bc8115ac8ff90173837",
+  "file_inventory_rows": 3090,
+  "file_inventory_canonical_sha256": "a001278ae7e69631db472884ae1f85ab713c7d3c57c9b9c9ca897934371ec8fd",
+  "file_inventory_file_sha256": "bef077a2d2bdf4e90f3e35d58755a2b62ae7c968dd3b4e65c78692607ef3118c"
+}

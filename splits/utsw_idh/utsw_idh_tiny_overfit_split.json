@@ -1,0 +1,50 @@
+{
+  "dataset": "utsw_idh",
+  "purpose": "tiny_set_overfit_only",
+  "seed": 42,
+  "patient_id_source": "Subject ID",
+  "canonical_manifest_sha256": "8e88daca748196fa3d63324c5ecc188e76b203965843ad87c625be0b4b1d125a",
+  "train": [
+    "BT0955",
+    "BT0193",
+    "BT0712",
+    "BT0347",
+    "BT0252",
+    "BT0027",
+    "BT1301",
+    "BT0610",
+    "BT0716",
+    "BT0468",
+    "BT0617",
+    "BT0378"
+  ],
+  "val": [
+    "BT0687",
+    "BT1138",
+    "BT1243",
+    "BT0425"
+  ],
+  "test": [
+    "BT0830",
+    "BT0740",
+    "BT0660",
+    "BT0196"
+  ],
+  "counts": {
+    "train": {
+      "cases": 12,
+      "idh_wildtype": 6,
+      "idh_mutant": 6
+    },
+    "val": {
+      "cases": 4,
+      "idh_wildtype": 2,
+      "idh_mutant": 2
+    },
+    "test": {
+      "cases": 4,
+      "idh_wildtype": 2,
+      "idh_mutant": 2
+    }
+  }
+}

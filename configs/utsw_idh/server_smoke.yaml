@@ -1,0 +1,18 @@
+base_config: "server_base.yaml"
+
+output_dir: outputs/utsw_idh/server_smoke_seed42
+
+data:
+  split_json: splits/utsw_idh/utsw_idh_server_smoke_split.json
+  allow_subset_split: true
+
+train:
+  epochs: 1
+  batch_size: 1
+  early_stop_patience: 2
+
+calibration:
+  enable_threshold_calibration: false
+
+eval:
+  test_all_combos: false
