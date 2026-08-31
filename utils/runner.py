@@ -176,6 +176,7 @@ def evaluate_with_explanations(
     explain_num_cases: int = 3,
     roi_drop_enabled: bool = True,
     edge_type_drop_enabled: bool = True,
+    class_names=None,
 ):
     model.eval()
     output_dir = Path(output_dir)
@@ -192,7 +193,8 @@ def evaluate_with_explanations(
     metrics = compute_binary_metrics(y_true, y_prob, threshold=threshold)
     y_pred = (y_prob >= threshold).astype(int)
     cm = confusion_matrix(y_true, y_pred, labels=[0, 1])
-    save_confusion_matrix(cm, ["LGG(0)", "HGG(1)"], output_dir / "confusion_matrix.png")
+    display_names = list(class_names if class_names is not None else ["LGG(0)", "HGG(1)"])
+    save_confusion_matrix(cm, display_names, output_dir / "confusion_matrix.png")
     metrics = _append_optional_stats(metrics, stage_stats.tolist() if len(stage_stats) > 0 else [])
     metrics = _append_classifier_info(metrics, model)
     metrics["threshold"] = float(threshold)
