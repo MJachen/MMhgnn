@@ -14,7 +14,7 @@ from models import HybridHypergraphClassifier
 from utils import load_config, set_seed, setup_logger
 from utils.config import ensure_dir
 from utils.io import load_json, save_json
-from utils.metrics import build_drop_t1_ablation_report, calibrate_grouped_3way_t1ce_t1, calibrate_threshold, threshold_dispatch_for_combo, threshold_for_combo
+from utils.metrics import build_drop_t1_ablation_report, calibrate_grouped_3way_t1ce_t1, calibrate_threshold, compute_binary_metrics, summarize_missing_pattern_metrics, threshold_dispatch_for_combo, threshold_for_combo
 from utils.runner import collect_predictions, evaluate_with_explanations, run_epoch
 from utils.training import build_dataloader, build_datasets, build_sampler, class_weights_from_records, dump_split_summary
 from utils.visualization import save_fusion_weight_history
@@ -32,16 +32,25 @@ def parse_args():
     return parser.parse_args()
 
 
-def collect_validation_predictions_for_combos(model, config, device, combos):
+def collect_validation_predictions_for_combos(model, config, device, combos, threshold: float = 0.5):
     y_true, y_prob, combo_tags = [], [], []
+    metrics_by_combo = {}
     for combo in combos:
         _, val_ds_combo, _, _ = build_datasets(config, explicit_eval_combo=combo)
         val_loader_combo = build_dataloader(val_ds_combo, config["train"]["batch_size"], config["data"].get("num_workers", 0), shuffle=False)
         collected = collect_predictions(model, val_loader_combo, device)
+        combo_name = "_".join(combo)
+        metrics_by_combo[combo_name] = compute_binary_metrics(collected["y_true"], collected["y_prob"], threshold=threshold)
         y_true.extend(collected["y_true"].tolist())
         y_prob.extend(collected["y_prob"].tolist())
         combo_tags.extend(collected.get("combos", [tuple(combo)] * len(collected["y_true"])))
-    return {"y_true": y_true, "y_prob": y_prob, "combos": combo_tags}
+    return {
+        "y_true": y_true,
+        "y_prob": y_prob,
+        "combos": combo_tags,
+        "metrics_by_combo": metrics_by_combo,
+        "summary": summarize_missing_pattern_metrics(metrics_by_combo, config["data"]["modalities"]),
+    }
 
 
 def set_backbone_trainable(model, trainable: bool) -> None:
@@ -66,7 +75,7 @@ def split_provenance(splits):
     }
 
 
-def checkpoint_payload(model, optimizer, config, epoch, score, best_score, bad_epochs, history, splits, threshold_metadata=None):
+def checkpoint_payload(model, optimizer, config, epoch, score, best_score, bad_epochs, history, splits, threshold_metadata=None, selection_metrics=None):
     fingerprint_path = config.get("data", {}).get("manifest_fingerprint_json")
     manifest_fingerprint = None
     if fingerprint_path and Path(fingerprint_path).is_file():
@@ -83,6 +92,8 @@ def checkpoint_payload(model, optimizer, config, epoch, score, best_score, bad_e
         "seed": int(config["seed"]),
         "canonical_manifest_sha256": manifest_fingerprint,
         "split": split_provenance(splits),
+        "selection_metric": config["train"].get("save_metric", "auc"),
+        "selection_metrics": selection_metrics or {},
         "threshold_calibration": threshold_metadata
         or {
             "enabled": False,
@@ -113,6 +124,16 @@ def main():
     if args.resume is not None:
         overrides["train"] = {"resume": args.resume}
     config = load_config(args.config, overrides=overrides or None)
+
+    missing_val_cfg = config.get("missing_aware_validation", {})
+    missing_val_enabled = bool(missing_val_cfg.get("enabled", False))
+    if missing_val_enabled:
+        if config["train"].get("mode") != "missing_curriculum_train":
+            raise ValueError("15-pattern model selection is reserved for missing_curriculum_train runs.")
+        if config.get("calibration", {}).get("threshold_mode", "global") != "global":
+            raise ValueError("Missing-aware training permits exactly one global validation-calibrated threshold.")
+        if config["train"].get("enable_targeted_finetune", False):
+            raise ValueError("Targeted fine-tuning must remain disabled for the missing-aware protocol.")
 
     set_seed(int(config["seed"]))
     logger = setup_logger(config.get("logging", {}).get("level", "INFO"))
@@ -149,6 +170,13 @@ def main():
     bad_epochs = 0
     history = []
     metric_name = config["train"].get("save_metric", "auc")
+    if missing_val_enabled and metric_name != "mean15_bal_acc":
+        raise ValueError("Missing-aware checkpoint selection must use train.save_metric=mean15_bal_acc.")
+    validation_interval = max(int(missing_val_cfg.get("interval_epochs", 5)), 1)
+    validation_threshold = float(missing_val_cfg.get("selection_threshold", config["eval"].get("threshold", 0.5)))
+    all_modality_combos = get_all_modality_combinations(config["data"]["modalities"])
+    latest_selection_score = float("nan")
+    latest_selection_metrics = {}
     start_epoch = 1
     resume_path = config["train"].get("resume")
     if resume_path:
@@ -157,6 +185,11 @@ def main():
         optimizer.load_state_dict(resume_checkpoint["optimizer"])
         if int(resume_checkpoint.get("seed", config["seed"])) != int(config["seed"]):
             raise RuntimeError("Resume checkpoint seed does not match the requested run seed.")
+        fingerprint_path = config.get("data", {}).get("manifest_fingerprint_json")
+        current_fingerprint = load_json(fingerprint_path).get("canonical_manifest_sha256") if fingerprint_path and Path(fingerprint_path).is_file() else None
+        saved_fingerprint = resume_checkpoint.get("canonical_manifest_sha256")
+        if saved_fingerprint and current_fingerprint and saved_fingerprint != current_fingerprint:
+            raise RuntimeError("Resume checkpoint manifest fingerprint does not match the current frozen manifest.")
         saved_split = resume_checkpoint.get("split")
         if saved_split and saved_split != split_provenance(splits):
             raise RuntimeError("Resume checkpoint split does not match the current frozen split.")
@@ -164,9 +197,12 @@ def main():
         best_score = float(resume_checkpoint.get("best_score", resume_checkpoint.get("score", -1.0)))
         bad_epochs = int(resume_checkpoint.get("bad_epochs", 0))
         history = list(resume_checkpoint.get("history", []))
+        latest_selection_score = float(resume_checkpoint.get("score", float("nan")))
+        latest_selection_metrics = dict(resume_checkpoint.get("selection_metrics", {}))
         logger.info("Resumed training from %s at epoch %d", resume_path, start_epoch)
 
-    for epoch in range(start_epoch, int(config["train"]["epochs"]) + 1):
+    total_epochs = int(config["train"]["epochs"])
+    for epoch in range(start_epoch, total_epochs + 1):
         if hasattr(train_ds, "set_epoch"):
             train_ds.set_epoch(epoch, int(config["train"]["epochs"]), config["train"])
         train_metrics = run_epoch(
@@ -188,25 +224,75 @@ def main():
             threshold=config["eval"].get("threshold", 0.5),
             desc=f"val {epoch}",
         )
-        score = val_metrics.get(metric_name, float("nan"))
-        if score != score:
-            score = val_metrics.get("bal_acc", 0.0)
+        selection_event = not missing_val_enabled
+        if missing_val_enabled and (epoch % validation_interval == 0 or epoch == total_epochs):
+            selection_event = True
+            missing15_val = collect_validation_predictions_for_combos(
+                model,
+                config,
+                device,
+                all_modality_combos,
+                threshold=validation_threshold,
+            )
+            latest_selection_metrics = dict(missing15_val["summary"])
+            latest_selection_score = float(latest_selection_metrics["mean15_bal_acc"])
+            val_metrics["mean15_bal_acc"] = latest_selection_score
+            val_metrics["mean15_auc"] = float(latest_selection_metrics["mean15_auc"])
+            validation_payload = {
+                "epoch": epoch,
+                "selection_threshold": validation_threshold,
+                "per_pattern": missing15_val["metrics_by_combo"],
+                "summary": missing15_val["summary"],
+            }
+            save_json(validation_payload, metrics_dir / f"val_missing15_epoch_{epoch:03d}.json")
+            pd.DataFrame(
+                [{"combo": combo_name, **metrics} for combo_name, metrics in missing15_val["metrics_by_combo"].items()]
+            ).to_csv(metrics_dir / f"val_missing15_epoch_{epoch:03d}.csv", index=False)
+            pd.DataFrame(missing15_val["summary"]["groups"]).to_csv(
+                metrics_dir / f"val_missing15_epoch_{epoch:03d}_groups.csv", index=False
+            )
+            logger.info(
+                "Epoch %d | 15-pattern val mean BAC=%.4f mean AUC=%.4f",
+                epoch,
+                latest_selection_score,
+                float(latest_selection_metrics["mean15_auc"]),
+            )
+
+        if missing_val_enabled:
+            score = latest_selection_score
+        else:
+            score = val_metrics.get(metric_name, float("nan"))
+            if score != score:
+                score = val_metrics.get("bal_acc", 0.0)
 
         history.append({"epoch": epoch, "train": train_metrics, "val": val_metrics})
         logger.info("Epoch %d | train=%s | val=%s", epoch, json.dumps(train_metrics, ensure_ascii=False), json.dumps(val_metrics, ensure_ascii=False))
 
-        improved = score > best_score
-        if improved:
-            best_score = score
-            bad_epochs = 0
-        else:
-            bad_epochs += 1
-        payload = checkpoint_payload(model, optimizer, config, epoch, score, best_score, bad_epochs, history, splits)
+        improved = False
+        if selection_event:
+            improved = score > best_score
+            if improved:
+                best_score = score
+                bad_epochs = 0
+            else:
+                bad_epochs += validation_interval if missing_val_enabled else 1
+        payload = checkpoint_payload(
+            model,
+            optimizer,
+            config,
+            epoch,
+            score,
+            best_score,
+            bad_epochs,
+            history,
+            splits,
+            selection_metrics=latest_selection_metrics,
+        )
         torch.save(payload, ckpt_dir / "last.pt")
         if improved:
             torch.save(payload, ckpt_dir / "best.pt")
             logger.info("Saved new best checkpoint with %s=%.4f", metric_name, score)
-        if bad_epochs >= int(config["train"].get("early_stop_patience", 8)):
+        if selection_event and bad_epochs >= int(config["train"].get("early_stop_patience", 8)):
             logger.info("Early stopping triggered at epoch %d", epoch)
             break
 
@@ -319,6 +405,21 @@ def main():
                 metric=calibration_cfg.get("threshold_metric", "balanced_accuracy"),
                 default_threshold=float(calibration_cfg.get("default_threshold", 0.5)),
             )
+        elif missing_val_enabled and calibration_cfg.get("pool_validation_all_combos", True):
+            val_collected = collect_validation_predictions_for_combos(model, config, device, all_modality_combos)
+            calibration_result = calibrate_threshold(
+                val_collected["y_true"],
+                val_collected["y_prob"],
+                metric=calibration_cfg.get("threshold_metric", "balanced_accuracy"),
+            )
+            calibration_result.update(
+                {
+                    "mode": "global",
+                    "source": "frozen_validation_split_all_15_patterns_pooled",
+                    "num_patterns": len(all_modality_combos),
+                    "num_predictions": len(val_collected["y_true"]),
+                }
+            )
         else:
             val_collected = collect_predictions(model, val_loader, device)
             calibration_result = calibrate_threshold(
@@ -402,6 +503,17 @@ def main():
 
     save_json(all_test_metrics, metrics_dir / "test_metrics.json")
     pd.DataFrame(test_rows).to_csv(metrics_dir / "test_metrics.csv", index=False)
+    if len(all_test_metrics) == len(all_modality_combos):
+        missing_pattern_summary = summarize_missing_pattern_metrics(all_test_metrics, config["data"]["modalities"])
+        save_json(missing_pattern_summary, metrics_dir / "test_missing_pattern_summary.json")
+        pd.DataFrame(missing_pattern_summary["groups"]).to_csv(metrics_dir / "test_missing_pattern_groups.csv", index=False)
+        logger.info(
+            "15-pattern test summary | mean BAC=%.4f mean AUC=%.4f full BAC=%.4f full AUC=%.4f",
+            float(missing_pattern_summary["mean15_bal_acc"]),
+            float(missing_pattern_summary["mean15_auc"]),
+            float(missing_pattern_summary["full_modality"]["bal_acc"]),
+            float(missing_pattern_summary["full_modality"]["auc"]),
+        )
 
 
 if __name__ == "__main__":

@@ -1,0 +1,42 @@
+base_config: "server_base.yaml"
+
+output_dir: outputs/utsw_idh/missing_aware_seed42
+
+data:
+  split_json: splits/utsw_idh/utsw_idh_debug_split.json
+  allow_subset_split: false
+
+train:
+  mode: missing_curriculum_train
+  fixed_combo: [t2, t1ce, t1, flair]
+  epochs: 100
+  batch_size: 1
+  early_stop_patience: 15
+  save_metric: mean15_bal_acc
+  enable_targeted_finetune: false
+  curriculum_stage1_ratio: 0.20
+  curriculum_stage2_ratio: 0.30
+  curriculum_stage3_ratio: 0.50
+  stage2_full_ratio: 0.70
+  stage2_single_missing_ratio: 0.30
+  stage3_full_ratio: 0.15
+  stage3_single_missing_ratio: 0.30
+  stage3_double_missing_ratio: 0.35
+  stage3_triple_missing_ratio: 0.20
+
+missing_aware_validation:
+  enabled: true
+  interval_epochs: 5
+  selection_threshold: 0.5
+
+calibration:
+  enable_threshold_calibration: true
+  threshold_mode: global
+  threshold_metric: balanced_accuracy
+  default_threshold: 0.5
+  pool_validation_all_combos: true
+
+eval:
+  test_all_combos: true
+  test_all_combos_when_random_missing: false
+

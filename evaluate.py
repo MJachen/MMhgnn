@@ -11,8 +11,8 @@ from datasets.brats_dataset import get_all_modality_combinations
 from models import HybridHypergraphClassifier
 from utils import load_config, set_seed, setup_logger
 from utils.config import ensure_dir
-from utils.io import save_json
-from utils.metrics import build_drop_t1_ablation_report, threshold_dispatch_for_combo, threshold_for_combo
+from utils.io import load_json, save_json
+from utils.metrics import build_drop_t1_ablation_report, summarize_missing_pattern_metrics, threshold_dispatch_for_combo, threshold_for_combo
 from utils.runner import evaluate_with_explanations
 from utils.training import build_dataloader, build_datasets
 
@@ -34,6 +34,16 @@ def select_device(device_name: str) -> torch.device:
     if device_name.startswith("cuda") and torch.cuda.is_available():
         return torch.device(device_name)
     return torch.device("cpu")
+
+
+def split_provenance(splits):
+    return {
+        name: [
+            {"case_id": record.case_id, "patient_id": getattr(record, "patient_id", record.case_id), "label": int(record.label)}
+            for record in records
+        ]
+        for name, records in splits.items()
+    }
 
 
 def main():
@@ -64,6 +74,18 @@ def main():
     model.load_state_dict(checkpoint["model"])
     model.eval()
     calibration_result = checkpoint.get("threshold_calibration", {})
+    if config.get("missing_aware_validation", {}).get("enabled", False):
+        if calibration_result.get("mode", "global") != "global":
+            raise RuntimeError("Missing-aware evaluation requires the single global threshold stored in its checkpoint.")
+        fingerprint_path = config.get("data", {}).get("manifest_fingerprint_json")
+        current_fingerprint = load_json(fingerprint_path).get("canonical_manifest_sha256") if fingerprint_path and Path(fingerprint_path).is_file() else None
+        saved_fingerprint = checkpoint.get("canonical_manifest_sha256")
+        if saved_fingerprint and current_fingerprint and saved_fingerprint != current_fingerprint:
+            raise RuntimeError("Checkpoint manifest fingerprint does not match the current frozen manifest.")
+        _, _, _, current_splits = build_datasets(config)
+        saved_split = checkpoint.get("split")
+        if saved_split and saved_split != split_provenance(current_splits):
+            raise RuntimeError("Checkpoint split does not match the current frozen split.")
     threshold = float(checkpoint.get("calibrated_threshold", config.get("calibration", {}).get("default_threshold", config["eval"].get("threshold", 0.5))))
     logger.info("Using evaluation threshold mode=%s default/global=%.4f", calibration_result.get("mode", "global"), threshold)
 
@@ -104,6 +126,17 @@ def main():
 
     save_json(all_metrics, output_dir / "metrics.json")
     pd.DataFrame(rows).to_csv(output_dir / "metrics.csv", index=False)
+    if len(all_metrics) == len(get_all_modality_combinations(config["data"]["modalities"])):
+        missing_pattern_summary = summarize_missing_pattern_metrics(all_metrics, config["data"]["modalities"])
+        save_json(missing_pattern_summary, output_dir / "missing_pattern_summary.json")
+        pd.DataFrame(missing_pattern_summary["groups"]).to_csv(output_dir / "missing_pattern_groups.csv", index=False)
+        logger.info(
+            "15-pattern summary | mean BAC=%.4f mean AUC=%.4f full BAC=%.4f full AUC=%.4f",
+            float(missing_pattern_summary["mean15_bal_acc"]),
+            float(missing_pattern_summary["mean15_auc"]),
+            float(missing_pattern_summary["full_modality"]["bal_acc"]),
+            float(missing_pattern_summary["full_modality"]["auc"]),
+        )
 
 
 if __name__ == "__main__":

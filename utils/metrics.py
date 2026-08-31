@@ -45,6 +45,53 @@ def compute_binary_metrics(y_true, y_prob, threshold: float = 0.5) -> Dict[str, 
     }
 
 
+MISSING_PATTERN_METRICS = ("bal_acc", "auc", "acc", "sen", "spe")
+
+
+def summarize_missing_pattern_metrics(metrics_by_combo: Dict[str, Dict], modalities: Sequence[str]) -> Dict[str, object]:
+    """Summarize per-pattern metrics with equal weight for each non-empty modality pattern."""
+    rows = []
+    for combo_name, metrics in metrics_by_combo.items():
+        combo = tuple(part for part in combo_name.split("_") if part)
+        rows.append({"combo": combo_name, "modalities": combo, "metrics": metrics})
+
+    def aggregate(selected_rows):
+        aggregate_row = {"num_patterns": len(selected_rows)}
+        for metric_name in MISSING_PATTERN_METRICS:
+            values = np.asarray([row["metrics"].get(metric_name, float("nan")) for row in selected_rows], dtype=float)
+            finite = values[np.isfinite(values)]
+            aggregate_row[f"mean_{metric_name}"] = float(finite.mean()) if len(finite) > 0 else float("nan")
+        return aggregate_row
+
+    grouped = []
+    for observed_count in range(1, len(modalities) + 1):
+        selected = [row for row in rows if len(row["modalities"]) == observed_count]
+        grouped.append({"group_type": "observed_modalities", "group": str(observed_count), **aggregate(selected)})
+
+    subgroup_rules = {
+        "t1ce_absent": lambda combo: "t1ce" not in combo,
+        "t2_absent": lambda combo: "t2" not in combo,
+        "t1ce_t2_both_present": lambda combo: "t1ce" in combo and "t2" in combo,
+        "t1ce_t2_both_absent": lambda combo: "t1ce" not in combo and "t2" not in combo,
+    }
+    for group_name, predicate in subgroup_rules.items():
+        selected = [row for row in rows if predicate(set(row["modalities"]))]
+        grouped.append({"group_type": "shortcut_subgroup", "group": group_name, **aggregate(selected)})
+
+    overall = aggregate(rows)
+    full_combo_name = "_".join(modalities)
+    full_metrics = metrics_by_combo.get(full_combo_name, {})
+    return {
+        "num_patterns": overall["num_patterns"],
+        "mean15_bal_acc": overall["mean_bal_acc"],
+        "mean15_auc": overall["mean_auc"],
+        "mean15_metrics": overall,
+        "full_modality_combo": full_combo_name,
+        "full_modality": {name: full_metrics.get(name, float("nan")) for name in MISSING_PATTERN_METRICS},
+        "groups": grouped,
+    }
+
+
 def calibrate_threshold(y_true, y_prob, metric: str = "balanced_accuracy", num_steps: int = 201) -> Dict[str, float]:
     """Search a global decision threshold on validation predictions only."""
     y_true = np.asarray(y_true).astype(int)

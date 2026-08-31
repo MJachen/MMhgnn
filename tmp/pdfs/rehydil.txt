@@ -1,0 +1,541 @@
+
+===== PAGE 1 =====
+
+Hypergraph Tversky-Aware Domain Incremental
+Learning for Brain Tumor Segmentation with
+Missing Modalities
+Junze Wang1†, Lei Fan2,3†, Weipeng Jing1, Donglin Di4, Yang Song3, Sidong
+Liu5, and Cong Cong5
+1 College of Computer and Control Engineering, Northeast Forestry University,
+Harbin, China
+2 The Centre for Healthy Brain Ageing (CHeBA), UNSW, Sydney, Australia
+3 School of Computer Science and Engineering, UNSW, Sydney, Australia
+4 School of Software, Tsinghua University, Beijing, China
+5 Centre for Health Informatics, Macquarie University, Sydney, Australia
+thomas.cong@mq.edu.au
+Abstract. Existing methods for multimodal MRI segmentation with
+missing modalities typically assume that all MRI modalities are available
+during training. However, in clinical practice, some modalities may be
+missing due to the sequential nature of MRI acquisition, leading to per-
+formance degradation. Furthermore, retraining models to accommodate
+newly available modalities can be inefficient and may cause overfitting,
+potentiallycompromisingpreviouslylearnedknowledge.Toaddressthese
+challenges, we propose Replay-based Hypergraph Domain Incremental
+Learning (ReHyDIL) for brain tumor segmentation with missing modal-
+ities. ReHyDIL leverages Domain Incremental Learning (DIL) to enable
+the segmentation model to learn from newly acquired MRI modalities
+without forgetting previously learned information. To enhance segmen-
+tation performance across diverse patient scenarios, we introduce the
+Cross-Patient Hypergraph Segmentation Network (CHSNet), which uti-
+lizes hypergraphs to capture high-order associations between patients.
+Additionally, we incorporate Tversky-Aware Contrastive (TAC) loss to
+effectively mitigate information imbalance both across and within differ-
+ent modalities. Extensive experiments on the BraTS2019 dataset demon-
+strate that ReHyDIL outperforms state-of-the-art methods, achieving an
+improvement of over 2% in the Dice Similarity Coefficient across various
+tumor regions. Our code is available at ReHyDIL.
+Keywords: Missing modality · Brain tumor segmentation· Domain in-
+cremental learning · Class imbalance · Hypergraph.
+† Equal contribution
+ Corresponding author
+
+===== PAGE 2 =====
+
+2 J. Wang et al.
+1 Introduction
+In clinical practice, brain tumor diagnosis is typically supported by observations
+using four routine Magnetic Resonance Imaging (MRI) modalities: T1, T1CE,
+T2, and FLAIR [13]. Each modality provides unique tissue contrasts that aid in
+identifying different tumor regions, such as the whole tumor (WT), tumor core
+(TC), and enhancing tumor (ET) [16]. Consequently, accurate and automated
+segmentation of these modalities is crucial for effective diagnosis and treatment.
+Recent advances in deep learning have significantly enhanced multimodal
+brain tumor segmentation [10,19]. However, model performance often degrades
+due to missing modalities, which is a common issue caused by clinical constraints
+such as varying acquisition protocols [30]. Existing methods address this issue
+primarily through feature fusion [26,29,5,28], knowledge distillation [12,17,27],
+and modality masking [22,25,18]. However, these methods often assume that all
+MRI modalities are available during training, which is a condition often unmet in
+practice. To address this challenge, we draw inspiration from Domain Incremen-
+tal Learning (DIL) [21,24]. However, directly applying DIL presents challenges.
+Specifically, catastrophic forgetting occurs when newly added modalities over-
+shadow previously acquired ones during training, leading to an inter-modality
+imbalance. Moreover, tumor regions typically occupy only a small portion of the
+image relative to the background, resulting in an intra-modality imbalance [3,4].
+These issues hinder the model’s ability to learn robust cross-modal features,
+ultimately degrading segmentation performance in missing modality scenarios.
+Accordingly, we introduce the Replay-based Hypergraph Domain Incremen-
+tal Learning (ReHyDIL). ReHyDIL employs a replay buffer to retain data from
+previous modalities, enabling the model to continue domain adaptation [7,8],
+learn cross-modalfeatures and mitigate catastrophic forgetting.To address inter-
+modality imbalance, we propose the Tversky-Aware Contrastive (TAC) loss with
+a balanced queue. This loss encourages the model to learn robust correlations
+between different modalities, bridging the information gap caused by missing
+modalities during inference and reducing modality imbalance. For intra-modality
+imbalance at the pixel level, we employ Tversky loss and Tversky-based Focal
+loss, ensuring better segmentation of small and less-represented tumor struc-
+tures. Moreover, to effectively leverage the rich patient-level information in MRI
+datasets, we propose CHSNet, a hypergraph-based segmentation network de-
+signed to capture complex inter-patient relationships. In CHSNet, each patient
+is represented as a vertex, connected by hyperedges to others with similar tumor
+features. The contributions can be summarized as follows:
+–WeproposeReHyDILforbraintumorsegmentationwithmissingmodalityin
+scenarios where MRI modalities are incrementally available during training.
+–We introduce the Tversky-Aware Contrastive (TAC) loss to balance the
+learning between different modalities.
+–We present the Cross-Patient Hypergraph Segmentation Network (CHSNet),
+which captures high-order associations across patients, enhancing feature
+representations and improving segmentation performance.
+
+===== PAGE 3 =====
+
+Title Suppressed Due to Excessive Length 3
+D1 Di Replay Buffer  (R) Current Modality (Di)
+CHSNet (       )
+···
+···
+CHSNet (     )
+TAC Matrix
+CHSNet (     )
+ TAC Loss
+R Di
+DT Loss + FT Loss 
+Replay-based Hypergraph Domain Incremental Learning (ReHyDIL)
+···
+Replay Buffer (R)
+Replay Buffer
+FN
+TP
+TN
+FP
+Tversky-Aware drives
+the decision boundary.
+Replay Buffer
+No tumor sample
+Tversky-aware positive sample pairs
+Whole tumor (WT) sample
+Tumor core (TC) sampleEnhancing tumor (ET) sample
+Negative sample pairs
+......
+Fig.1: The ReHyDIL pipeline processes a set of MRI modalities acquired sequen-
+tially, leveraging incremental learning to train CHSNet. This training is guided
+by our proposed TAC loss, alongside other Tversky-based segmentation losses.
+At the end of each learning phase, a replay buffer is constructed to store sam-
+ples from the currently learned modalities. This mechanism enables the trained
+CHSNet to effectively capture cross-modality features, improving the segmenta-
+tion of different tumor regions even in the presence of missing modalities.
+–Compared to existing state-of-the-art methods, ReHyDIL achieves higher
+Dice Similarity Coefficients (DSC) on the BraTS2019 dataset, with gains of
+1.05% for Whole Tumor (WT), 2.53% for Tumor Core (TC), and 1.52% for
+Enhancing Tumor (ET).
+2 Method
+2.1 Replay-based Hypergraph Domain Incremental Learning
+We illustrate the overall workflow of ReHyDIL in Fig. 1, where the core objective
+is to train the proposed CHSNet (Section 2.2) Fθm : X m
+p → Y c,m
+p with m
+continuously arriving MRI modalities. In this study, each consecutively arriving
+MRI modality strictly corresponds to one training stage.X m
+p and Y c,m
+p denote
+the input sample and its prediction for patientp, andc denotes the tumor region
+label. Initially, Fθ1 is trained using samples from the first modalityD1, and a
+replay buffer is initialized. In the subsequent training stages (1 < i ≤ m), where
+new modalities are introduced, Fθi loads the weights from the previous stage
+and is trained using the proposed TAC loss (Section 2.3) along with samples
+from previously encountered modalities stored in the replay buffer.
+To build the replay bufferR with a capacity T, we retain P% of samples
+from each training stage Di. Then T is calculated as T = Pm
+i=1 ∥Di∥ × P %.
+For a given modalityDi, we follow the mean loss strategy [11] to select the top
+P% of samples with loss values closest to the median lossµ. Specifically, for
+
+===== PAGE 4 =====
+
+4 J. Wang et al.
+Vertices
+HGNN
+Cross-Patient Hypergraph
+...
+...
+...
+...
+...
+Maxpooling
+Encoder block
+Decoder block Skip connection
+Upsampling
+Cross-Patient Hypergraph
+v1 v2 vN
+CHSNet
+Hypergraph construction
+Flatten
+Fig.2: Illustration of the proposed CHSNet. CHSNet follows a U-Net architec-
+ture, incorporating hypergraphs into the last and second-to-last encoder layers.
+These hypergraphs effectively encode cross-patient information into the output
+features, which serve as inputs to the subsequent decoder blocks.
+each sample X i
+p, we compute its deviation:dp =
+Ltotal(X i
+p, θi) − µ
+. Samples
+are ranked in ascending order based ondp, withσ(X i
+p) denoting the rank ofX i
+p.
+The top P% ranked samples are stored in the replay buffer according to:
+R = {X i
+p ∈ Di | σ(X i
+p) ≤ ∥Di∥ × P %}. (1)
+Samples stored inR will be used together withDi to train CHSNet using TAC
+loss. This enables the final model,Fθm, to incrementally learn from all modalities
+and effectively perform segmentation even in the presence of missing modalities.
+2.2 Cross-Patient Hypergraph Segmentation Network
+CHSNet is designed to capture cross-patient associations and enhance segmenta-
+tion performance by integrating a Cross-Patient Hypergraph (CPH). To enforce
+this cross-patient learning, we impose a constraint during each batch sampling
+to ensure that selected samples originate from different patients. As illustrated
+in Fig. 2, CHSNet is built upon the U-Net architecture [14]. Empirically, we
+embed the hypergraph into the 4th and 5th encoders to learn different feature
+representations, enabling more robust segmentation performance.
+Weconstructeachhypergraphusingtheencoder’soutput, Ef ∈ RB×C×H×W.
+First, we flattenEf from (B, C, H, W ) to (N, C), where N = B × H × W repre-
+sents the total number of hypergraph vertices. Each vertex corresponds to aC-
+dimensional feature vector, formally denoted as:V = [ v1; v2; . . . ; vN ] ∈ RN ×C,
+where vj ∈ RC. To construct the hypergraph G, we employ a K-Nearest
+Neighbours (KNN) method based on Euclidean distance [9,23]. Initially, a
+KNN search is performed for each vertex withK = 1 , generating a prelim-
+inary incidence matrix H, where a value of 1 indicates a connection between
+vertices via a hyperedge. Next, we refine the hypergraph structure by updat-
+ing the K-value of each vertexvj to match its degree inH, i.e., K(j) is set to
+the degree of vj. A second KNN search is then performed using the updated
+K-values to establish the final hypergraph structure. As a result, each vertex
+vj is connected to its set of nearest neighbors,NK(j), defining the hyperedge
+
+===== PAGE 5 =====
+
+Title Suppressed Due to Excessive Length 5
+as: ej = {vj} ∪ NK(j)(vj). This process yields the updated incidence matrix
+H ∈ RN ×K, along with the vertex degree matrix Dv and hyperedge degree
+matrix De.
+Subsequently, HGNN [12] is employed to integrate cross-patient higher-order
+relationships. The updated hypergraph featuresV′ are computed as follows:
+V′ = D
+− 1
+2
+v HWeD−1
+e H⊤D
+− 1
+2
+v V, (2)
+where D
+− 1
+2
+v normalizes vertex degrees,We is a learnable weight for hyperedges
+andisinitiallysetto1.Next,wereshape V′ backto (B, C, H, W ),aligningitwith
+theoriginalfeaturemap Ef.Finally,weconcatenate V′ and Ef alongthechannel
+dimension and fuse the resulting features via a 1 × 1 convolution, producing
+integrated feature representations to be passed into subsequent decoder blocks.
+2.3 Tversky-Aware Contrastive Loss
+We propose the TAC loss to regularize CHSNet by leveraging samples stored in
+R alongside those from the current modalityDi. However, due to the limited size
+of R, which can be easily overwhelmed byDi, we introduce a balanced queue (Q)
+mechanism to effectively address this inter-modality imbalance.Q is designed as
+a double-queue structure, where one queue (QR) stores predictions of samples
+from R generated by Fθi−1, and the other (QD) contains predictions of samples
+from Di produced by Fθi.
+Specifically, given a batch ofB predictions, we randomly selectS predictions,
+where S = min( B, ∥R∥), from each QR and QD, and normalize them before
+storingtheminthememorybank Q,ensuringthat ∥Q∥ = 2S.Foreachprediction
+Y c
+p ∈ Qi, we define its positive pairY c
+q ∈ Qj̸=i. This means that they come from
+different patients and different modalities but share the same predicted region.
+Similarly, we define the negative pairY z
+q ∈ Qj̸=i, where p ̸= q and c ̸= z. Then
+contrastive learning is conducted via:
+LTAC = − log exp(Stve(Y c
+p , Y c
+q )/τ )
+exp(Stve(Y cp , Y cq )/τ ) +P
+p̸=q,c̸=z exp(Stve(Y cp , Y zq )/τ ) , (3)
+where τ is the temperature coefficient and is set to 1,Stve is the Tversky simi-
+larity. Following [20], we defineStve as:
+Stve(g, u) = gu
+gu + αg(1 − u) + β(1 − g)u , (4)
+where g and udenotetwodifferentpredictions, αand β arehyperparametersthat
+control the trade-off between false positives (FPs, i.e., false detections) and false
+negatives (FNs, i.e., missed detections). In Equation 3, the anchor predictionY c
+p
+is used asg, while the predictions of the paired samplesY c
+q , Y z
+q are used asu.
+However, due to intra-modality imbalance, a naively trained CHSNet may
+produce high-precision but low-recall segmentations, where FNs ≫ FPs. To
+mitigate this imbalance, we explicitly setβ > α , applying a greater penalty to
+
+===== PAGE 6 =====
+
+6 J. Wang et al.
+Table 1: Segmentation results of WT, TC, and ET in terms of DSC(%) on the
+BraTS2019 dataset. Missing and available modalities are denoted by◦ and •,
+respectively. “† ”denotes significance level is reached as p-value< 0.05.
+Modalities WT TC ET
+T2 T1c T1 FLmmF MFI M3 M+P OursmmF MFI M3 M+P OursmmF MFI M3 M+P Ours
+• ◦ ◦ ◦ 80.66 81.87 84.49 82.7486.71†69.45 58.26 71.35 55.7473.68†37.93 39.82 47.61 36.2949.75†
+◦ • ◦ ◦ 73.64 74.39 78.62 75.8879.48†78.62 81.32 83.95 82.8384.65†70.64 76.53 79.33 79.2980.17†
+◦ ◦ • ◦ 73.76 73.28 79.32 78.3280.77†61.36 65.14 65.98 62.1369.34†33.05 33.82 44.43 38.4045.22†
+◦ ◦ ◦ • 87.31 86.96 86.38 87.0588.25†66.85 57.31 70.37 64.5372.87†37.37 40.67 45.62 38.2348.61†
+• • ◦ ◦ 84.55 85.81 85.74 84.4787.13†79.98 85.20 83.25 82.9485.96†71.92 80.04 78.76 79.7580.51†
+◦ • • ◦ 77.60 74.21 80.31 79.9581.48†79.98 83.09 85.4386.5986.3271.38 77.47 80.3182.3580.97
+◦ ◦ • • 88.90 88.09 90.17 89.1289.63†70.44 65.96 66.32 66.5971.75†41.93 41.47 48.83 42.4949.55†
+• ◦ • ◦ 83.17 84.52 86.29 85.3087.58†68.73 60.63 65.52 62.1669.42†42.46 43.36 44.65 38.9847.36†
+• ◦ ◦ • 88.68 89.53 90.21 88.6790.3970.72 65.43 70.21 68.4870.96†43.5447.2946.69 46.75 46.93
+◦ • ◦ • 88.50 89.91 90.75 89.5691.42†80.84 82.26 83.02 82.3783.22†72.03 77.52 78.17 75.5878.65†
+◦ • • • 89.02 89.78 89.89 89.9190.75†82.33 85.96 86.13 86.0686.4672.82 83.2384.1783.19 83.26
+• ◦ • • 89.08 90.06 90.44 89.9991.19†71.90 66.37 71.87 59.8772.50†45.34 47.89 50.26 37.0848.11†
+• • ◦ • 88.94 91.05 91.21 89.8391.46†81.64 86.99 86.53 86.2087.79†72.25 83.32 82.48 82.1084.62†
+• • • ◦ 84.95 86.47 87.89 86.5987.98†81.27 85.58 86.41 88.1289.24†72.98 81.11 82.35 82.8883.46†
+• • • • 89.21 90.81 91.36 90.3592.43†82.47 86.79 86.51 87.7388.06†72.74 83.34 83.88 82.7685.35†
+Means 84.53 85.12 86.87 85.9187.7875.09 74.42 77.53 74.8279.4957.23 62.46 65.17 61.7466.16
+FNs to better capture rare positive objects, as shown in Fig. 1. Furthermore, we
+designanintra-modalityregularization Lintra = LDT+LFT underthissetup( β >
+α). Specifically,LDT is a Tversky-based Dice loss, which extends Dice loss with
+Tversky similarity to systematically suppress FNs. Furthermore,LFT integrates
+Tversky similarity into Focal loss [15] to further reduce FNs by focusing on
+difficult-to-classify samples:
+LDT(y, t) = 1 −
+nX
+i=1
+Stve(yi, ti), LFT(y, t) = (1 −
+nX
+i=1
+Stve(yi, ti))γ, (5)
+where yi denotes the i-th predicted pixel probability,t denotes its ground truth
+label, andγ is used to adjust the level of attention given to minority class pixels.
+The total loss is supervised byLTAC, and Lintra:
+Ltotal = ωLTAC + Lintra. (6)
+3 Experiment
+Datasets. BraTS2019 dataset [1] is a multimodal MRI dataset specifically de-
+signed for brain tumor segmentation, comprising 335 patient-level 3D image
+volumes. Each case includes four modalities: T1, T1CE (T1c), T2, and FLAIR
+(FL), and three tumor regions: ET, TC, and WT. For each 3D volume, 2D slices
+were extracted along the z-axis and cropped to a resolution of 224× 224 pixels.
+The dataset was divided into training, validation, and testing subsets using an
+8:1:1 ratio, resulting in 41,540 training slices from 268 patients, 5,115 validation
+
+===== PAGE 7 =====
+
+Title Suppressed Due to Excessive Length 7
+Image GTFLAIR+T1CE+T2+T1FLAIR+T1CE+T2FLAIR+T1CEFLAIR
+Tversky similarityDice similarity
+Fig.3: The segmentation visualizations of Dice-based method and ReHyDIL
+(Tversky similarity), where the difference is only the similarity used. WT, TC,
+and ET are marked with light gray, medium gray and white, respectively.
+slices from 33 patients, and 5,270 testing slices from 34 patients. To maintain
+data integrity, slices from the same patient were assigned to the same subset.
+Experimental Setup.All models were trained using PyTorch on 2× NVIDIA
+Tesla V100 GPUs for 200 epochs with a batch size of 64. The Adam optimizer
+was employed with a learning rate of1 × 10−4 and a weight decay of4 × 10−4.
+A warm-up multi-step learning rate scheduler with four steps was utilised. For
+hyperparameters, we set ω = 0 for D1; for all subsequent modalities, ω was
+set to 1. We set P = 10 , α = 0 .7, β = 1 .5, and γ = 1 .2. Furthermore, the
+modalities were utilized sequentially for training, following the typical order
+of clinical acquisition [6]: T1→T2→FLAIR→T1CE. Missing modality scenarios
+were implemented by settingDi (where i ∈ { T2, T1CE, T1, FLAIR}) to 0. For
+the evaluation metric, we calculated the Dice Similarity Coefficient (DSC) for
+each tumor region within each patient’s 3D image volume and compared our
+method with the second-best method using a paired t-test to obtain p-values.
+Quantitative Results.We compared the proposed method with state-of-the-
+artapproachesformissingmodalitybraintumorsegmentation,includingfeature-
+fusion methods mmFormer (mmF) [26] and UNet-MFI (MFI) [29], knowledge
+distillation methods M3AE (M3) [12] and PASSION [17], and the modality-
+masked method M2FTrans (M+P) [18]. Specifically, PASSION is applied to
+M2FTrans (M+P) as described in [17]. As shown in Table 1, ReHyDIL out-
+performs all compared methods in 41 out of 45 cases, demonstrating a superior
+average Dice Similarity Coefficient (DSC). Specifically, for Whole Tumor (WT),
+ReHyDILachievesanaverageDSCof87.78%,representinga3.13%improvement
+over MFI [29]. For Tumor Core (TC), it attains an average DSC of 79.49%, re-
+flecting a 2.53% gain relative to M3 [12]. Regarding Enhancing Tumor (ET),
+ReHyDIL reaches an average DSC of 66.16%, signifying a 7.16% enhancement
+over M+P [18]. Moreover, the p-values are less than 0.05 in 39 out of 45 cases,
+indicating that the performance improvements of ReHyDIL over other baselines
+are statistically significant. It is noteworthy that all compared methods assume
+the availability of all MRI modalities during training. In contrast, our method
+
+===== PAGE 8 =====
+
+8 J. Wang et al.
+Table 2: Ablation study for (a) the encoder layers where CPH is added and
+different similarity measure in contrastive losses, (b) Tversky similarity hyper-
+parameters α and β, (c) different modules in ReHyDIL.
+DSC(%)
+WT TC ET
+Layers
+5 85.32 76.48 61.95
+5, 4 87.78 79.49 66.16
+5, 4, 379.95 68.59 50.82
+SimilarityCosine84.18 75.03 62.74
+Tversky87.78 79.49 66.16
+(a)
+α β DSC(%)
+WT TC ET
+0.5 0.580.12 74.58 60.31
+0.9 1.384.73 77.04 63.19
+0.8 1.485.96 77.27 64.85
+0.7 1.587.78 79.49 66.16
+0.6 1.685.29 76.71 62.48
+(b)
+DIL CPH TACDSC(%)
+WT TC ET
+✔ 60.14 44.62 33.58
+✔ ✔ 76.42 55.04 47.29
+✔ ✔ 82.56 71.85 58.76
+✔ ✔ ✔ 87.78 79.49 66.16
+(c)
+operates under a more realistic scenario where modalities are obtained incremen-
+tally. The superior performance of ReHyDIL further demonstrates its potential
+as a reliable tool for real clinical applications.
+Qualitative Results.The segmentation visualizations are presented in Fig. 3.
+Integrating additional modalities provides complementary features, which en-
+hance segmentation performance. For example, when only the FLAIR modality
+is available, ReHyDIL can roughly delineate the whole tumor (WT) but strug-
+gles to accurately segment the enhancing tumor (ET) and tumor core (TC).
+Incorporating T1CE and T2 modalities (i.e., FLAIR+T1CE+T2) significantly
+improves ET segmentation, achieving a closer alignment with the ground truth
+(GT). Furthermore, the visualizations demonstrate that Tversky similarity out-
+performs Dice similarity in segmenting boundary regions and smaller regions,
+highlighting its effectiveness in mitigating intra-modality imbalance.
+Ablation Study.We first compared the impact of adding Cross-Patient Hyper-
+graph (CPH) modules to different layers of CHSNet, as shown in Table 2(a). The
+results indicate that two CPH layers yield the best segmentation performance,
+while adding a third layer causes a significant decline due to over-smoothing.
+Additionally, we examined the effectiveness of different similarity metrics in the
+TAC loss. Compared to cosine similarity [2], using Tversky similarity improves
+the Dice score, as it directly measures the overlap between target regions, effec-
+tively mitigating intra-modality imbalance.
+Furthermore, the ablation studies reveal a key trade-off in controlling false
+negatives (FNs), as shown in Table 2(b). Withα = β = 0 .5, Tversky similarity
+Stve simplifies to the Dice similarity, which performs poorly due to an insuffi-
+cient FN penalty. Gradually increasingβ from 1.3 to 1.5 significantly improves
+DSC across all regions, highlighting the importance of penalizing FNs to reduce
+missed detections. The best performance is achieved atα = 0 .7, β = 1 .5. How-
+ever, further increasingβ to 1.6 leads to performance collapse, likely from over-
+suppressing ambiguous boundaries. Finally, we conducted ablation studies on the
+overall framework. Without CPH, CHSNet reduces to the U-Net, and without
+TAC loss, the model relies solely on intra-modality regularizationLintra. These
+results confirm that both CPH and TAC loss individually and collectively en-
+hance segmentation performance—CPH by integrating high-order inter-patient
+relationships and TAC loss by bridging the information gap during inference.
+
+===== PAGE 9 =====
+
+Title Suppressed Due to Excessive Length 9
+4 Conclusion
+In this paper, we propose the ReHyDIL framework for brain tumor segmenta-
+tion with missing modalities, leveraging DIL to incrementally learn from new
+modalities while preserving prior knowledge. Specifically, we propose TAC loss,
+which effectively balances the learning process across different modalities and
+mitigates the information gap caused by missing modalities during inference.
+Additionally, we introduce CHSNet to capture high-order relationships between
+patients, enhancing segmentation performance. Extensive experiments on the
+BraTS2019 dataset demonstrate that ReHyDIL achieves state-of-the-art perfor-
+mance in missing modality scenarios. Though effective, ReHyDIL has certain
+limitations. Its use of a replay buffer introduces additional memory overhead,
+and the framework is currently limited to four MRI modalities with similar im-
+age characteristics. In future work, we aim to explore alternative DIL strategies
+and develop more advanced alignment mechanisms or adaptors to effectively fuse
+features from diverse modalities.
+Disclosure of Interests. The authors have no competing interests to declare that
+are relevant to the content of this article.
+Acknowledgments. This work was partially supported by an NHMRC Ideas Grant
+(GNT202035).
+References
+1. Bakas, S., Reyes, M., Jakab, A., Bauer, S., Rempfler, M., Crimi, A., Shinohara,
+R.T., Berger, C., Ha, S.M., Rozycki, M., et al.: Identifying the best machine learn-
+ing algorithms for brain tumor segmentation, progression assessment, and overall
+survival prediction in the brats challenge. arXiv preprint arXiv:1811.02629 (2018)
+2. Chen, T., Kornblith, S., Norouzi, M., Hinton, G.: A simple framework for con-
+trastive learning of visual representations. In: ICML. pp. 1597–1607. PmLR (2020)
+3. Cong, C., Liu, S., Rana, P., Pagnucco, M., Di Ieva, A., Berkovsky, S., Song,
+Y.: Adaptive unified contrastive learning with graph-based feature aggregator for
+imbalanced medical image classification. Expert Systems with Applications251,
+123783 (2024)
+4. Cong, C., Xuan, S., Liu, S., Zhang, S., Pagnucco, M., Song, Y.: Decoupled optimi-
+sation for long-tailed visual recognition. In: AAAI. vol. 38, pp. 1380–1388 (2024)
+5. Ding, Y., Yu, X., Yang, Y.: Rfnet: Region-aware fusion network for incomplete
+multi-modal brain tumor segmentation. In: ICCV. pp. 3975–3984 (2021)
+6. Ellingson, B.M., Bendszus, M., Boxerman, J., Barboriak, D., Erickson, B.J., Smits,
+M., Nelson, S.J., Gerstner, E., Alexander, B., Goldmacher, G., et al.: Consensus
+recommendations for a standardized brain tumor imaging protocol in clinical trials.
+Neuro-oncology 17(9), 1188–1198 (2015)
+7. Fan, L., Ding, Y., Fan, D., Di, D., Pagnucco, M., Song, Y.: Grainspace: A large-
+scale dataset for fine-grained and domain-adaptive recognition of cereal grains. In:
+CVPR. pp. 21116–21125 (2022)
+
+===== PAGE 10 =====
+
+10 J. Wang et al.
+8. Fan, L., Sowmya, A., Meijering, E., Song, Y.: Fast ff-to-ffpe whole slide image
+translation via laplacian pyramid and contrastive learning. In: MICCAI. pp. 409–
+419. Springer (2022)
+9. Gao, Y., Zhang, Z., Lin, H., Zhao, X., Du, S., Zou, C.: Hypergraph learning:
+Methods and practices. IEEE TPAMI44(5), 2548–2566 (2020)
+10. Jing, W., Wang, J., Di, D., Li, D., Song, Y., Fan, L.: Multi-modal hypergraph
+contrastive learning for medical image segmentation. Pattern Recognition 165,
+111544 (2025)
+11. Kalb, T., Mauthe, B., Beyerer, J.: Improving replay-based continual semantic seg-
+mentation with smart data selection. In: 2022 IEEE 25th International Conference
+on Intelligent Transportation Systems (ITSC). pp. 1114–1121. IEEE (2022)
+12. Liu, H., Wei, D., Lu, D., Sun, J., Wang, L., Zheng, Y.: M3ae: multimodal represen-
+tation learning for brain tumor segmentation with missing modalities. In: AAAI.
+vol. 37, pp. 1657–1665 (2023)
+13. Rees, J.: Advances in magnetic resonance imaging of brain tumours. Current opin-
+ion in neurology16(6), 643–650 (2003)
+14. Ronneberger, O., Fischer, P., Brox, T.: U-net: Convolutional networks for biomed-
+ical image segmentation. In: MICCAI. pp. 234–241. Springer (2015)
+15. Ross, T.Y., Dollár, G.: Focal loss for dense object detection. In: CVPR. pp. 2980–
+2988 (2017)
+16. Sawlani, V., Patel, M.D., Davies, N., Flintham, R., Wesolowski, R., Ughratdar, I.,
+Pohl, U., Nagaraju, S., Petrik, V., Kay, A., et al.: Multiparametric mri: practical
+approach and pictorial review of a useful tool in the evaluation of brain tumours
+and tumour-like lesions. Insights into imaging11, 1–19 (2020)
+17. Shi, J., Shang, C., Sun, Z., Yu, L., Yang, X., Yan, Z.: Passion: Towards effective in-
+complete multi-modal medical image segmentation with imbalanced missing rates.
+In: ACM International Conference on Multimedia. pp. 456–465 (2024)
+18. Shi, J., Yu, L., Cheng, Q., Yang, X., Cheng, K.T., Yan, Z.: M2ftrans: Modality-
+masked fusion transformer for incomplete multi-modality brain tumor segmenta-
+tion. IEEE Journal of Biomedical and Health Informatics (2023)
+19. Tang, Q., Fan, L., Pagnucco, M., Song, Y.: Prototype-based image prompting for
+weakly supervised histopathological image segmentation. In: CVPR. pp. 30271–
+30280 (2025)
+20. Tversky, A.: Features of similarity. Psychological review84(4), 327 (1977)
+21. VandeVen,G.M.,Tuytelaars,T.,Tolias,A.S.:Threetypesofincrementallearning.
+Nature Machine Intelligence4(12), 1185–1197 (2022)
+22. Wang, Z., Hong, Y.: A2fseg: Adaptive multi-modal fusion network for medical
+image segmentation. In: MICCAI. pp. 673–681. Springer (2023)
+23. Yi, K., Chen, J., Wang, Y.G., Zhou, B., Lio, P., Fan, Y., Hamann, J.: Approximate
+equivariance so (3) needlet convolution. In: Topological, Algebraic and Geometric
+Learning Workshops 2022. pp. 189–198. PMLR (2022)
+24. Yuan, B., Zhao, D.: A survey on continual semantic segmentation: Theory, chal-
+lenge, method and application. IEEE TPAMI (2024)
+25. Zeng, Z., Peng, Z., Yang, X., Shen, W.: Missing as masking: Arbitrary cross-modal
+feature reconstruction for incomplete multimodal brain tumor segmentation. In:
+MICCAI. pp. 424–433. Springer (2024)
+26. Zhang, Y., He, N., Yang, J., Li, Y., Wei, D., Huang, Y., Zhang, Y., He, Z., Zheng,
+Y.: mmformer: Multimodal medical transformer for incomplete multimodal learn-
+ing of brain tumor segmentation. In: MICCAI. pp. 107–117. Springer (2022)
+
+===== PAGE 11 =====
+
+Title Suppressed Due to Excessive Length 11
+27. Zhang, Z., Liu, X., Chen, Z., Zhang, Y., Yue, H., Ou, Y., Sun, X.: Anatomical
+consistency distillation and inconsistency synthesis for brain tumor segmentation
+with missing modalities. arXiv preprint arXiv:2408.13733 (2024)
+28. Zhang, Z., Yang, G., Zhang, Y., Yue, H., Liu, A., Ou, Y., Gong, J., Sun, X.:
+Tmformer: Token merging transformer for brain tumor segmentation with missing
+modalities. In: AAAI. vol. 38, pp. 7414–7422 (2024)
+29. Zhao, Z., Yang, H., Sun, J.: Modality-adaptive feature interaction for brain tumor
+segmentation with missing modalities. In: MICCAI. pp. 183–192. Springer (2022)
+30. Zhou, T., Canu, S., Vera, P., Ruan, S.: Latent correlation representation learning
+for brain tumor segmentation with missing mri modalities. IEEE Transactions on
+Image Processing 30, 4263–4274 (2021)

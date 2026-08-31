@@ -1,0 +1,1503 @@
+
+===== PAGE 1 =====
+
+1
+D3Seg: Dependency-Aware Diffusion for Brain
+Tumor Segmentation with Missing Modalities
+Danish Ali, Ajmal Mian, Naveed Akhtar, and Ghulam Mubashar Hassan
+Abstract—Accurate brain tumor segmentation using multi-
+parametric MRI is critical for effective treatment planning.
+However, in clinical settings, complete acquisition of all MRI
+sequences is not always possible. The absence of certain MRI
+modalities results in substantial performance degradation in
+existing segmentation methods, which typically rely on naive
+feature concatenation or direct fusion strategies. To address this
+limitation, we propose a novel segmentation model D3Seg which is
+designed to maintain stable performance under missing-modality
+settings. D 3Seg introduces Multi-hop Modality Graph Fusion
+(MMGF) to model higher-order inter-modality dependencies, a
+lightweight diffusion-based imputation mechanism to compensate
+for missing T1ce and FLAIR feature representations in latent
+space, and probability-space decision refinement to mitigate
+dominant-class overconfidence and improve delineation of under-
+represented tumor subregions. We evaluate the proposed D 3Seg
+model on BraTS 2023 Glioma as the primary benchmark and
+further test it on a subset of the external BraTS 2023 Meningioma
+cohort to assess generalization across tumor pathologies. The
+results are compared with the state-of-the-art models under dif-
+ferent missing-modality conditions. The proposed model achieves
+approximately 1.5–2.0% Dice improvement on enhancing tumor
+(ET) and around 1.0% on tumor core (TC) across multiple
+missing-modality configurations compared to the current state-of-
+the-art model on BraTS Glioma dataset. Cross-cohort evaluation
+on BraTS Meningioma dataset demonstrates the generalizability
+of the proposed model, showing consistent improvements in the
+challenging TC and ET regions, with approximately 1.5-3.0%
+and 1.5-6.5% gains respectively across several missing-modality
+configurations.
+Index Terms—Graph Fusion Latent Diffusion BraTS Brain
+Tumor Segmentation Missing MRI Modality
+I. INTRODUCTION
+Brain tumors are among the most aggressive and life-
+threatening neurological diseases [1]. Precise delineation of
+tumor sub-regions is crucial for accurate diagnosis and effec-
+tive treatment planning. Magnetic resonance imaging (MRI) is
+widely used to capture detailed structural information of brain
+tissue through multi-parametric image acquisition [2]. Stan-
+dard clinical protocols routinely acquire four MRI sequences
+[3]: T1, contrast-enhanced T1 (T1ce), T2 and FLAIR, which
+This research is supported by the Australian Government Research Training
+Scholarship. The authors also gratefully acknowledge the organizers of the
+BraTS2023 Challenge for providing the dataset used in this research. Dr.
+Naveed Akhtar is a recipient of the ARC Discovery Early Career Researcher
+Award (project #DE230101058), funded by the Australian Government.
+Danish Ali, Ajmal Mian, and Ghulam Mubashar Hassan are with
+The University of Western Australia, Perth, W A 6009, Australia
+(e-mail: danish.ali@research.uwa.edu.au; ajmal.mian@uwa.edu.au;
+ghulam.hassan@uwa.edu.au).
+Naveed Akhtar is with The University of Melbourne, Melbourne, Parkville
+VIC 3010, Australia (e-mail: naveed.akhtar1@unimelb.edu.au).
+Corresponding Author: Danish Ali.
+collectively provide complementary information required for
+delineating healthy and tumorous regions. However, the acqui-
+sition of all MRI modalities is not always possible in clinical
+practice, as imaging protocols vary across institutions and
+contrast agents are not suitable for certain patients [4].
+Manual tumor segmentation is a labor-intensive process
+and is prone to inter-observer variability [5]. Consequently,
+automatic brain tumor segmentation has emerged as an active
+area of research [6], [7]. However, most existing methods rely
+on complete multimodal MRI inputs [8]–[13], and their per-
+formance degrades significantly in the absence of one or more
+MRI modalities [14]. To address this, studies have explored
+diverse modeling strategies to propose automatic brain tumor
+segmentation in the scenario of missing modalities [15]–[19].
+These techniques differ in handling missing information and
+integrating it into the segmentation pipeline.
+One of the earliest approaches is HeMIS [20], which
+introduces a hetero-modal segmentation framework that pro-
+cesses each MRI modality through a dedicated convolutional
+pipeline and aggregates the feature representations across
+available modalities using statistical operations. In contrast,
+Rob-Seg [21] proposes a feature disentanglement strategy
+combined with a gated feature fusion mechanism to improve
+robustness under missing-modality conditions. A2FSeg [22]
+further extends this approach by introducing a two-stage
+fusion strategy that combines average feature aggregation with
+adaptive modality weighting to better exploit complementary
+information across modalities.
+Although fusion-based methods [20], [22] have demon-
+strated promising performance, they primarily rely on in-
+formation from the available modalities and lack explicit
+mechanisms to compensate for missing inputs [23]. To address
+this limitation, reconstruction-based approaches have been
+proposed to synthesize missing modalities or learn multimodal
+representations by exploiting cross-modality correlations [24]–
+[28]. In this context, U-HVED [29] employs a hetero-modal
+variational encoder–decoder to learn a shared latent repre-
+sentation across modalities, jointly performing modality com-
+pletion and segmentation. Similarly, M 3AE [30] proposes a
+masked autoencoding framework, where random subsets of
+MRI modalities and spatial regions of the remaining modalities
+are simultaneously masked, and the model learns to reconstruct
+the masked content. Building upon this masking strategy,
+M3FeCon [31] employs a multi-layer transformer to en-
+able feature-to-feature reconstruction across arbitrary modality
+combinations. However, reconstructing all missing modality
+features, irrespective of their contribution to the segmentation
+objective, may introduce unnecessary computational overhead
+arXiv:2605.22249v2  [cs.CV]  23 Jun 2026
+
+===== PAGE 2 =====
+
+2
+and reduce practical efficiency [32].
+Knowledge distillation-based methods [33], [34] offer an
+alternative for segmentation under incomplete modality inputs
+by training student models corresponding to different missing-
+modality configurations under the supervision of a teacher
+model trained on complete modalities. However, the effective-
+ness of such designs is highly dependent on the reliability
+of the teacher network, and they incur additional training
+overhead [35].
+Beyond reconstruction and distillation-based methods, re-
+cent works have explored transformer and Mamba-based ar-
+chitectures [36], [37] to better capture long-range contextual
+dependencies [38], [39]. Motivated by their success, IM-
+Fuse [40] was recently introduced which adopts a Mamba-
+based backbone for multi-scale long-range contextual model-
+ing, complemented by intra-modality and inter-modality trans-
+former blocks at the bottleneck to refine cross-modality feature
+interactions. While this hierarchical global modeling improves
+whole tumor segmentation, performance gain for the clinically
+critical enhancing tumor (ET) remains inconsistent across dif-
+ferent missing-modality configurations. Moreover, incorporat-
+ing intra-modality transformer blocks increases computational
+cost.
+To overcome the above limitations, we propose D 3Seg,
+a dependency-aware diffusion-imputed segmentation network
+with decision refinement for brain tumor segmentation with
+missing modalities. Unlike existing fusion-based methods that
+rely solely on available modalities, or reconstruction-based
+approaches that indiscriminately synthesize all missing inputs,
+D3Seg selectively imputes clinically critical modality infor-
+mation while explicitly modeling cross-modality dependencies
+and refining segmentation decisions in a targeted manner. Our
+main contributions are summarized below:
+1) We propose a dependency-aware fusion approach that
+constructs a modality adjacency graph to model both
+direct and indirect inter-modality relationships via multi-
+hop propagation. This enables more expressive aggrega-
+tion of inter-modality information compared to simple
+average fusion.
+2) We propose a context-robust conditional latent diffusion
+module to directly synthesize the features of missing
+T1ce and FLAIR modalities at the network bottleneck.
+This provides targeted compensation for missing con-
+trast information.
+3) We propose a unique decision refinement module that
+explicitly addresses dominant-class overconfidence un-
+der missing-modalities. Our module adaptively redis-
+tributes probability mass toward underrepresented tumor
+subregions, improving subregion-level predictions and
+overall segmentation performance.
+Extensive evaluation on the BraTS 2023 Glioma [41] and
+BraTS 2023 Meningioma [42] datasets demonstrates that
+our method consistently improves segmentation performance
+compared to state-of-the-art approaches [30], [31], [40], [43].
+Specifically, the proposed method improves enhancing tumor
+(ET) Dice by approximately 1.5–2.0% and tumor core (TC)
+Dice by around 1.0% on the BraTS 2023 Glioma benchmark
+under multiple missing-modality configurations. On the exter-
+nal BraTS 2023 Meningioma cohort, the model further yields
+Dice gains of approximately 1.5–3.0% in TC and 1.5–6.5% in
+ET across several missing-modality settings, highlighting its
+effectiveness in clinically critical tumor subregions.
+II. RELATEDWORK
+This section reviews existing methods for brain tumor
+segmentation under missing MRI modality conditions, which
+are frequently encountered in clinical settings due to variations
+in acquisition protocols, scan quality, and patient conditions.
+Since segmentation models often rely on multiple comple-
+mentary MRI sequences [44], the absence of one or more
+modalities can substantially degrade performance. Existing ap-
+proaches that address this problem can be broadly categorized
+into two main groups: modality synthesis methods, which
+attempt to reconstruct or generate the missing modalities
+from the available ones, and multi-task representation learning
+approaches, which aim to learn modality-robust representa-
+tions that remain effective even when some modalities are
+unavailable.
+A. Modality Synthesis Methods
+Synthesis-based approaches aim to compensate for unavail-
+able MRI sequences by inferring missing information from
+observed modalities before segmentation. These approaches
+mainly differ in methodology to recover missing information:
+in a shared latent feature space or directly in the image domain
+[2], [25], [45], [46]. Latent-space synthesis methods, such
+as variational autoencoder-based approaches learn a shared
+representation across heterogeneous MRI modalities and use
+this representation to infer missing modality information [47],
+[48]. Image-domain synthesis methods instead generate the
+missing MRI sequence directly in the image space. Generative
+adversarial networks commonly follow image domain synthe-
+sis approach, where a generator predicts the absent modality
+and a discriminator encourages the synthesized image to
+resemble real MRI data [49]–[51]. Recently, diffusion-based
+methods have also been explored for missing MRI synthesis.
+Instead of relying on adversarial training, they estimate the
+target modality through an iterative denoising process. This
+denoising is performed either in the image domain [52], [53]
+or in a latent feature space [25], [54].
+Although these approaches differ in their generative mech-
+anisms, they share the same objective of exploiting cross-
+modality relationships among MRI sequences to approximate
+missing information and provide segmentation networks with
+enriched multimodal representations. By reconstructing ab-
+sent sequences, they improve segmentation performance when
+clinically informative modalities are unavailable. However,
+explicit generation of full resolution MRI volumes introduces
+additional computational cost and may produce synthetic arti-
+facts [55], [56].
+B. Multi-task Representation Learning Methods
+Another approach to overcome missing modalities problem
+for brain tumor segmentation is to use feature representations
+
+===== PAGE 3 =====
+
+3
+that remain stable when certain modalities are missing. Meth-
+ods using this approach explore auxiliary supervision [57],
+knowledge transfer [58] and feature alignment [59] which
+can be grouped as Multi-task representation learning meth-
+ods. Recent approaches within this line of approach further
+incorporate transformer architectures to enhance long-range
+contextual modeling and cross-modal feature interaction under
+incomplete-modality conditions [60]–[62].
+Multimodal medical transformer (mmFormer) [43] intro-
+duces modality-specific hybrid encoders together with intra-
+modal and inter-modal transformer blocks to capture both
+modality-specific context and cross-modality relationships un-
+der incomplete-modality settings. It further employs auxil-
+iary regularization in the encoder and decoder to improve
+robustness across arbitrary missing-modality combinations.
+Similarly, MMTSeg [63] combines Mamba and Transformer
+modules to enhance cross-modal feature learning and uses
+multimodal knowledge transfer to improve segmentation when
+only partial modality information is available. Despite their
+effectiveness, these methods often require careful balancing
+between the primary segmentation objective and auxiliary task
+learning, making performance sensitive to inter-task weight
+selection [64].
+III. METHODOLOGY
+The overall architecture of the proposed D 3Seg, a
+dependency-aware diffusion-imputed approach with decision
+refinement for brain tumor segmentation with missing modal-
+ities is presented in Fig. 1.
+Each MRI modality is processed by an independent 3D
+convolutional encoder to extract modality-specific feature rep-
+resentations. A binary modality mask (m∈0,1) is applied to
+MRI modality features, wherem= 1for available modalities
+andm= 0for missing ones. The extracted features are
+adaptively integrated using a dependency-aware multi-hop
+modality graph fusion (MMGF) applied at the bottleneck and
+the skip connection of preceding encoder level.
+To compensate for missing contrast-enhanced and FLAIR
+information, a diffusion-based latent imputation module syn-
+thesizes T1ce and FLAIR modality features. The fused and
+imputed features are further processed by a cross-modal trans-
+former at the bottleneck to capture global context. In addi-
+tion, Mamba-based fusion blocks are incorporated into high-
+resolution skip connections to efficiently capture multi-scale
+long-range contextual dependencies while preserving fine-
+grained spatial details. The resulting features are decoded by
+a 3D convolutional decoder to produce an initial segmentation
+estimate. Finally, an error-guided decision refinement module
+adaptively redistributes class probability mass to improve the
+delineation of under-segmented tumor regions, particularly ET.
+The main components of D 3Seg are explained below.
+A. Multi-hop Modality Graph Fusion
+Given heterogeneous and incomplete MRI modalities, ef-
+fective fusion requires modeling inter-modality dependencies
+beyond simple aggregation. Therefore, we propose a Multi-
+hop Modality Graph Fusion (MMGF) module as presented in
+Fig. 2 to capture both direct and higher-order relationships
+among MRI sequences while preserving the spatial feature
+maps required for accurate tumor delineation.
+LetF m ∈R C×D×H×W denote the spatial feature map
+extracted from modalitym, wherem∈ {1, . . . , M}andM
+is the total number of modalities. For each modality, we first
+apply global average pooling to obtain a compact modality
+descriptor:
+hm = GAP(Fm),(1)
+whereh m ∈R C represents the global semantic descriptor
+of modalitym. The pairwise dependency between modalities
+is encoded using a cosine-similarity-based adjacency matrix
+A∈R M×M :
+A=
+ h⊤
+i hj
+∥hi∥2∥hj∥2
+M
+i,j=1
+,(2)
+whereh i andh j denote the modality descriptors of thei-
+th andj-th MRI sequences, respectively. When a modality is
+missing, the corresponding rows and columns ofAare masked
+to prevent unreliable interactions from unavailable inputs.
+For T1ce and FLAIR at the bottleneck level, the original
+modality features are used when available; otherwise, the
+proposed diffusion-based latent imputation module provides
+the corresponding imputed representations (details in § III-B).
+To capture higher-order modality interactions, the masked
+adjacency matrix is expanded across multiple graph hops. This
+enables information from one modality to propagate through
+intermediate modalities rather than relying only on direct
+pairwise relationships. The normalized multi-hop adjacency
+matrix is computed as:
+ˆA= softmax
+ 3X
+k=1
+αkA(k)
+!
+,(3)
+whereA (k) denotes thek-hop adjacency matrix andα k are
+learnable hop weights that adaptively control the contribution
+of each graph-hop order. The graph-enhanced modality de-
+scriptors are then obtained by:
+Hout =ϕ
+
+ˆAH
+
+,(4)
+whereH= [h 1, . . . ,hM]denotes the stacked modality de-
+scriptors andϕ(·)is a learnable multi-layer perceptron (MLP).
+To preserve spatial information, MMGF does not directly
+use the pooled descriptors as segmentation features. Instead,
+the graph-enhanced modality descriptors are projected into
+modality-specific modulation weights, which are then applied
+to the original spatial feature maps:
+wm =σ
+ 
+ψ(hout
+m )
+
+,F out
+m =w m ⊙F m,(5)
+whereh out
+m is the graph-enhanced descriptor for modalitym,
+ψ(·)is a learnable projection,σ(·)denotes the sigmoid ac-
+tivation function, and⊙represents channel-wise modulation.
+This formulation preserves the original spatial feature map
+while adaptively enhancing or suppressing modality-specific
+responses according to learned inter-modality dependencies.
+
+===== PAGE 4 =====
+
+4
++
+Cross-Modal 
+Transformer
++
++
++
++
++
++
++
++
++
++
++
++
+Mamba Fusion 
+Blocks
+Modality Mask 
+m ∈ {0,1}
+[mf, mt1ce, mt1, mt2]
+Conv 
+Encoder
+(Flair)
+Conv 
+Encoder
+(T1ce)
+Conv 
+Encoder
+(T1)
+Conv 
+Encoder
+(T2)
+Error-Guided
+Decision Refinement
+Final  Segmentation
+Skip Connection
+Element-wise 
+Multiplication
+Feature Stacking
+Conditioning Path
+Data Path
+Legend
+Conv 
+Decoder
+Multi-modal 
+features F5
+Conditional 
+Latent Diffusion Imputer
+(Generates Missing Features 
+Fimp conditioned on Fobs)
+Available Features
+(Fobs = F5(in)    m)
+Modality Mask 
+m ∈ {0,1}
+[mf, mt1ce, mt1, mt2]
+Dependency Gate & Fusion
+Fout = (m     Fobs) + ((1 - m)     Fimp)
+Latent Feature Imputation
+Multi-modal 
+features F5
+Conditional 
+Latent Diffusion Imputer
+(Generates Missing Features 
+Fimp conditioned on Fobs)
+Available Features
+(Fobs = F5(in)    m)
+Modality Mask 
+m ∈ {0,1}
+[mf, mt1ce, mt1, mt2]
+Dependency Gate & Fusion
+Fout = (m     Fobs) + ((1 - m)     Fimp)
+Latent Feature Imputation
+Multi-modal 
+features F5
+Conditional 
+Latent Diffusion Imputer
+(Generates Missing Features 
+Fimp conditioned on Fobs)
+Available Features
+(Fobs = F5(in)    m)
+Modality Mask 
+m ∈ {0,1}
+[mf, mt1ce, mt1, mt2]
+Dependency Gate & Fusion
+Fout = (m     Fobs) + ((1 - m)     Fimp)
+Latent Feature Imputation
+Multi-hop 
+Modality Graph 
+Fusion (MMGF)Feature Map 
+(Fm)
+Multi-hop 
+Modality Graph 
+Fusion (MMGF)
++
+Fused Features 
+(Y)
++
+Cross-Modal 
+Transformer
++
++
++
++
++
++
++
++
++
++
++
++
+Mamba Fusion 
+Blocks
+Modality Mask 
+m ∈ {0,1}
+[mf, mt1ce, mt1, mt2]
+Conv 
+Encoder
+(Flair)
+Conv 
+Encoder
+(T1ce)
+Conv 
+Encoder
+(T1)
+Conv 
+Encoder
+(T2)
+Error-Guided
+Decision Refinement
+Final  Segmentation
+Skip Connection
+Element-wise 
+Multiplication
+Feature Stacking
+Conditioning Path
+Data Path
+Legend
+Conv 
+Decoder
+Multi-modal 
+features F5
+Conditional 
+Latent Diffusion Imputer
+(Generates Missing Features 
+Fimp conditioned on Fobs)
+Available Features
+(Fobs = F5(in)    m)
+Modality Mask 
+m ∈ {0,1}
+[mf, mt1ce, mt1, mt2]
+Dependency Gate & Fusion
+Fout = (m     Fobs) + ((1 - m)     Fimp)
+Latent Feature Imputation
+Multi-hop 
+Modality Graph 
+Fusion (MMGF)Feature Map 
+(Fm)
+Multi-hop 
+Modality Graph 
+Fusion (MMGF)
++
+Fused Features 
+(Y)
+Fig. 1: Architecture of the proposed Dependency Aware Diffusion Imputed Decision Refined Segmentation (D 3Seg) network.
+After graph-based modulation, the refined modality features
+are processed by a Mamba-based fusion block to obtain a
+compact high-level representation with spatial context. The
+graph-modulated features are arranged as a structured cross-
+modal token sequence, where learnable fusion tokens are
+introduced to capture complementary information from the
+modality-specific features. Through sequence modeling, the
+Mamba operator updates these fusion tokens by integrating
+cross-modal cues and propagating long-range contextual de-
+pendencies across the 3D spatial sequence.
+Y= Γ Mamba
+ 
+Fout
+1 , . . . ,Fout
+M ,Q
+
+,(6)
+whereQdenotes the learnable fusion tokens,Γ Mamba(·)is
+the Mamba-based contextual fusion operator applied to the
+graph-modulated modality features and fusion tokens, andYis
+the resulting sequence-level representation. The fusion tokens
+updated by Mamba sequence modeling are retained as the
+fused representation for subsequent high-level reasoning. In
+this design, the graph stage captures modality-level dependen-
+cies, whereas the Mamba stage consolidates the graph-refined
+features while preserving spatial structure and modeling long-
+range contextual interactions.
+The proposed MMGF is applied at the bottleneck and the
+immediately preceding encoder stage, where feature represen-
+tations are more global and semantically rich compared to
+early encoder layers, making them better suited for modeling
+inter-modality dependencies.
+B. Context-Robust Conditional Latent Diffusion
+Realizing the critical role of T1ce and FLAIR modalities
+in delineating tumor core and edema related boundaries,
+we propose a lightweight context robust conditional latent
+diffusion module to impute their features in the absence of
+these modalities as presented in Fig. 3.
+Instead of relying on zero-filling, feature masking, or down-
+stream fusion alone, the proposed module imputes missing
+T1ce and FLAIR features, using the available modalities as
+subject-specific guidance. Diffusion is performed directly
+in the latent feature space of the T1ce and FLAIR encoder
+branches, where semantic information is compactly encoded
+and the sampling cost is substantially reduced. A lightweight
+transformer-based denoiser with three cross attention layers is
+used to remove injected Gaussian noise from the target latent
+representation, conditioned on the latent features extracted
+from the available modalities. The forward diffusion process
+for the bottleneck latent representation (z m) of the target
+missing modalitym∈ {T1ce,FLAIR}is defined as:
+zt =α tzm +σ tϵ,ϵ∼ N(0,I),(7)
+wheretis the diffusion timestep, andα t andσ t define the
+noise schedule. We adopt the velocity parameterization to
+improve denoising stability across noise levels [65], with the
+target velocity defined as:
+vt =α tϵ−σ tzm.(8)
+The conditional denoiserD θ takes the noisy target latent
+zt, timestept, and conditioning representationcas input, and
+is optimized using the velocity-prediction objective:
+ˆv=D θ (zt, t,c),L diff =∥v t − ˆv∥2
+2 ,(9)
+where ˆvdenotes the predicted velocity. By conditioning the
+denoising process onc, the model learns to impute the target
+latent representation using subject-specific information from
+the available MRI modalities. The same conditional diffusion
+formulation is used for both T1ce and FLAIR imputation by
+changing the target latent.
+During inference, sampling starts from random noise and
+progressively reconstructs the missing latent feature under the
+available-modality condition. However, conditional diffusion
+can still produce locally unreliable latent tokens when the
+denoising prediction is overly sensitive to small perturbations
+in the conditioning representation [66]. To improve conditional
+reliability, we incorporate a context-robust remasking strategy
+during sampling.
+
+===== PAGE 5 =====
+
+5
+Global Average
+Pooling (GAP)
+Modulation Weight 
+Generation
+(Sigmoid Activation)
+T1C
+T2T1
+F T1C
+T2T1
+F A1
+A2
+A3
+α1
+α2
+α3
+++
+Multi-hop Graph
+Expansion
+A1
+A2
+A3
+α1
+α2
+α3
++
+Multi-hop Graph
+Expansion
+Graph Normalization
+(Softmax)
+Learnable Multi-layer 
+Perceptron (MLP)
+Spatial Feature 
+Modulation
+(wm     Fm)
+Learnable 
+Fusion Tokens 
+(Q) Mamba Fusion 
+Block
+Graph 
+Adjacency
+Learnable Hop 
+Weights
+Multi-hop Modality Graph Fusion (MMGF)
+Global Average
+Pooling (GAP)
+Modulation Weight 
+Generation
+(Sigmoid Activation)
+T1C
+T2T1
+F A1
+A2
+A3
+α1
+α2
+α3
++
+Multi-hop Graph
+Expansion
+Graph Normalization
+(Softmax)
+Learnable Multi-layer 
+Perceptron (MLP)
+Spatial Feature 
+Modulation
+(wm     Fm)
+Learnable 
+Fusion Tokens 
+(Q) Mamba Fusion 
+Block
+Graph 
+Adjacency
+Learnable Hop 
+Weights
+Multi-hop Modality Graph Fusion (MMGF)
+Input Feature 
+Map (Fm)
+Fused Features 
+(Y)
+Fig. 2: Multi-hop modality graph fusion (MMGF) module for higher-order cross-modality feature interaction.
+At selected denoising steps, the denoiser is evaluated under
+three conditioning as shown in Fig. 3: the true condition
+c, a zero condition0, and a perturbed condition ˜c. The
+perturbed condition is obtained by randomly masking a subset
+of conditioning tokens:
+˜c=m c ⊙c,(10)
+wherem c ∈ {0,1} N×1 is a random token mask and⊙de-
+notes token-wise multiplication. This produces three velocity
+predictions:
+ˆvcond =D θ(zt, t,c), ˆvzero =D θ(zt, t,0), ˆvpert =D θ(zt, t, ˜c).
+(11)
+Token-wise reliability is estimated by comparing context in-
+stability with condition contribution:
+ri =
+ˆvcond
+i − ˆvpert
+i
+2
+2ˆvcond
+i − ˆvzero
+i
+2
+2 +ε
+,(12)
+where the numerator measures how sensitive tokeniis to
+perturbations in the conditioning context, while the denom-
+inator measures the strength of the conditional signal relative
+to an unconditioned prediction. A high value ofr i indicates
+that the prediction at tokeniis disproportionately sensitive
+to perturbations of the conditioning context relative to its
+estimated conditional contribution. We therefore treat high-
+scoring tokens as unreliable conditional predictions and select
+them for remasking and correction, while preserving lower-
+scoring tokens to avoid unnecessary changes to stable latent
+regions.
+For the selected unreliable token setΩ, we partially re-noise
+the current latent state using the initial sampling noise:
+˜zt,i =
+(
+λzt,i + (1−λ)η i, i∈Ω,
+zt,i, i /∈Ω, (13)
+whereηdenotes the initial Gaussian noise andλcontrols the
+remasking strength. The denoiser is then re-evaluated on the
+remasked latent using the true condition:
+ˆvrev =D θ (˜zt, t,c),(14)
+where ˆvrev denotes the revised velocity prediction obtained
+after remasking and denoising the remasked latent. The final
+velocity prediction for the current sampling step is obtained
+by replacing only the selected unreliable token predictions:
+ˆvfinal
+i =
+(
+ˆvrev
+i , i∈Ω,
+ˆvcond
+i , i /∈Ω. (15)
+The scheduler then updates the latent sample using ˆvfinal.
+In our implementation, context-robust remasking is applied
+only during the intermediate sampling steps. At this stage,
+unreliable token predictions can be identified from their condi-
+tional sensitivity. This avoids unnecessary perturbation during
+the early generation phase and preserves the stability of the
+final refinement steps. The final sampled latent representation
+is inserted into the segmentation pipeline as the imputed T1ce
+and FLAIR features before MMGF. This provides the subse-
+quent graph-based modulation and Mamba-based fusion stages
+with T1ce and FLAIR related bottleneck representations when
+these critical modalities are unavailable, enabling modality-
+aware reasoning under incomplete MRI inputs.
+C. Error-Guided Decision Refinement
+The absence of certain MRI modalities often leads to
+under-segmentation of minority tumor classes, particularly the
+enhancing tumor, together with an overconfidence bias toward
+dominant classes such as edema (ED). To address this, we
+propose a unique error-guided decision refinement (EGDR)
+module that operates directly in the probability space to refine
+error-prone predictions.
+Given the decoder logits, a lightweight multi-scale
+convolution-based error predictor estimates a voxel-wise error
+likelihood map by aggregating local and dilated contextual
+information. This highlights the regions prone to under-
+segmentation for enhancing tumor. The predicted error like-
+lihood map is used to adaptively redistribute probability mass
+between related tumor classes:
+P ′
+et =P et+wet⊙∆;P ′
+ed =P ed−wed⊙∆; ∆ =e⊙P ed,
+(16)
+whereedenotes the voxel-wise error likelihood map,⊙
+represents element-wise multiplication, andw et andw ed are
+learnable weights that control the amount of probability mass
+(∆)transferred from ED to ET. The refined probabilities
+(P ′
+et, P ′
+ed)are normalized to preserve a valid distribution. The
+
+===== PAGE 6 =====
+
+6
+Reverse
+Denoising
+True 
+Condition
+Reverse
+Denoising
+True 
+Condition
+Reverse
+Denoising
+Zeros 
+Condition
+Reverse
+Denoising
+Perturbed 
+Condition
+Vcond
+Vzero
+Vpert
+Token 
+Reliability 
+& 
+Selective 
+Remasking
+Revised 
+Velocity
+zpred
+Inference Pipeline
+Bottleneck 
+Features (zm)
+Velocity 
+Prediction
+Reverse Denoising Process
+Denoiser
+(3 x Cross Attention) Condition(Fobs)
+Pure Noise
+Time Embedding
+Training Pipeline
+Forward Process
+z0 z1 z2 zT
+Timesteps (T) ∈ {0, 1, …, 999}
+Context-Robust Conditional Latent Diffusion
+ZT-1Z0
+Fig. 3: Conditional latent diffusion imputer for T1ce and FLAIR latent feature imputation.
+EGDR design increases ET confidence in under-segmented
+regions while suppressing ED overconfidence, resulting in
+balanced tumor subregion predictions.
+IV. EXPERIMENTS
+We evaluate the proposed method on the BraTS 2023
+Glioma benchmark [41], which contains 1,251 multi-
+parametric brain MRI scans with expert-annotated tumor
+labels. Each subject includes the standard MRI modalities
+used in brain tumor segmentation, and the corresponding
+annotations. Following recent missing-modality segmentation
+literature [40], we split the dataset into 70%, 10%, and 20%
+for training, validation, and testing, respectively. All splits are
+performed at the subject level to avoid data leakage.
+In addition to the BraTS 2023 Glioma benchmark, we
+further assess the generalization ability of the proposed model
+and competing state of the art methods on an external subset
+of the BraTS 2023 Meningioma dataset. This external evalu-
+ation is particularly important because most existing missing-
+modality brain tumor segmentation studies are evaluated only
+on BraTS Glioma or on variants derived from previous BraTS
+Glioma challenges. As a result, their reported performance
+may not fully reflect robustness to tumor-type shift. To the
+best of our knowledge, validation beyond the glioma domain
+remains largely unexplored in the missing-modality brain
+tumor segmentation setting.
+To address this gap, we construct an external test cohort of
+279 cases from the BraTS Meningioma dataset. To ensure a
+clinically meaningful and fair evaluation across all missing-
+modality scenarios, we include only cases in which all three
+tumor sub-regions are present: edema, enhancing tumor, and
+non-enhancing tumor. This selection criterion is important
+
+===== PAGE 7 =====
+
+7
+TABLE I: Quantitative results on BraTS 2023 Glioma across different missing modalities. Each column corresponds to a
+specific missing-modality configuration. Gray squares indicate available MRI modalities, whereas white squares denote missing
+modalities. Dice Score (%) is reported for Whole Tumor (WT), Tumor Core (TC), and Enhancing Tumor (ET). Bold and
+underlined values represent the best and second-best results.
+Models
+Modality Configurations
+F T1
+T1c T2
+F T1
+T1c T2
+F T1
+T1c T2
+F T1
+T1c T2
+F T1
+T1c T2
+F T1
+T1c T2
+F T1
+T1c T2
+F T1
+T1c T2
+F T1
+T1c T2
+F T1
+T1c T2
+F T1
+T1c T2
+F T1
+T1c T2
+F T1
+T1c T2
+F T1
+T1c T2
+F T1
+T1c T2
+Whole Tumor Dice Score (%)
+mmForm [43] 91.4 82.8 83.788.5 92.2 92.7 91.385.589.8 90.1 92.892.5 93.0 90.593.0SFusion [15] 89.1 78.5 77.6 87.0 90.8 91.2 91.3 81.3 88.2 88.7 91.7 91.6 92.1 88.8 92.2ShaSpec [17] 91.0 79.9 79.5 86.9 91.9 92.3 92.2 82.7 88.3 88.7 92.6 92.5 92.9 89.2 93.0
+M3AE [30] 91.5 81.7 82.5 88.5 91.9 92.5 92.2 83.6 89.2 89.7 92.6 92.1 93.0 90.0 92.9
+M3FeCon [31] 87.7 81.2 81.2 88.5 89.4 90.0 92.1 83.9 89.8 89.5 90.5 92.7 92.6 90.1 93.1IM-Fuse [40] 91.8 83.0 83.7 88.792.4 92.892.6 85.5 90.1 90.2 92.8 93.0 93.1 90.5 93.3Proposed 91.882.5 83.6 88.7 92.6 92.8 92.885.3 89.890.2 92.892.8 93.0 90.4 93.0
+Tumor Core Dice Score (%)
+mmForm [43] 78.3 73.6 89.2 74.5 80.6 90.7 80.0 90.1 77.5 90.6 90.9 80.8 91.0 90.8 91.0SFusion [15] 74.0 70.4 86.7 74.3 77.4 88.6 77.8 88.4 76.5 89.4 89.1 78.5 89.3 89.5 89.5ShaSpec [17] 74.3 71.5 87.8 72.6 78.1 89.7 77.3 89.3 76.2 89.6 90.3 79.1 90.4 90.0 90.7
+M3AE [30] 76.8 75.9 89.977.979.9 90.9 79.2 90.5 78.9 90.8 91.2 79.991.591.091.5
+M3FeCon [31] 72.3 74.1 90.1 75.9 77.1 90.9 79.1 90.6 79.5 90.7 91.2 80.9 91.2 91.4 91.1IM-Fuse [40] 78.8 75.490.576.580.9 91.479.991.279.191.2 91.681.4 91.3 91.5 91.5Proposed 79.1 76.689.5 77.7 80.8 90.881.490.380.590.7 91.081.991.1 90.8 91.1
+Enhancing Tumor Dice Score (%)
+mmForm [43] 58.8 54.7 84.1 58.3 62.5 84.9 63.9 84.7 62.5 84.7 84.8 66.0 84.2 85.9 84.7SFusion [15] 52.2 48.9 82.2 54.3 57.4 83.9 59.0 83.6 57.1 83.8 83.8 60.1 83.9 84.0 84.0ShaSpec [17] 53.3 49.1 80.5 52.4 57.4 81.9 58.0 81.7 56.1 81.9 82.4 59.6 82.1 82.4 82.4
+M3AE [30] 56.7 56.0 82.5 58.8 60.7 85.6 61.2 84.9 60.6 85.8 85.9 62.3 85.7 85.1 85.6
+M3FeCon [31] 53.2 53.8 82.8 56.6 58.0 83.5 60.4 84.3 61.2 83.9 84.0 62.4 84.0 84.4 84.2IM-Fuse [40] 59.5 56.3 83.5 59.6 63.9 85.0 64.3 84.5 63.6 84.9 85.1 67.0 85.2 85.6 85.8Proposed 60.6 59.3 86.4 61.2 65.9 87.3 67.3 86.9 65.6 87.3 87.5 68.7 87.5 87.3 87.4
+because different MRI modalities provide complementary in-
+formation for different tumor components; therefore, evaluat-
+ing cases containing all tumor sub-regions allows meaningful
+assessment of model robustness when one or more modalities
+are missing. The BraTS Meningioma cohort is used strictly
+for external testing and is not involved in training, validation,
+hyperparameter tuning, or model selection. Segmentation per-
+formance of the proposed model for both datasets is evaluated
+using the Dice similarity coefficient for the standard clinically
+relevant tumor regions: whole tumor (WT), tumor core (TC),
+and enhancing tumor (ET). These regions capture complemen-
+tary anatomical aspects of the tumor and are widely used in
+BraTS-based segmentation evaluation.
+The proposed model is implemented in PyTorch and trained
+for 1,000 epochs using the Adam optimizer with an initial
+learning rate of (2×10 −4). All experiments are conducted on
+an NVIDIA RTX 3090 GPU with a batch size of 3. To improve
+generalization and reduce the risk of overfitting, we apply
+data augmentation during training, including random flipping,
+random rotations, and intensity-based perturbations such as
+intensity shifting and intensity scaling.
+A. Training Objective
+The proposed segmentation network is trained using a com-
+bined Dice and cross-entropy loss to balance region overlap
+and voxel-wise classification. The error refinement module
+is supervised with a binary cross-entropy loss to identify
+erroneous or under-segmented regions, while the diffusion
+model is trained using a mean squared error objective in latent
+space.
+B. Results and Analysis
+Table I presents performance of the proposed method and
+its comparison with state of the art methods using BraTS
+2023 Glioma dataset under different modality availability
+configurations for whole tumor (WT), tumor core (TC), and
+enhancing tumor (ET). For a fair comparison, all results are
+reported on the same BraTS 2023 test set which is used by
+IMFuse [40], which also benchmarks other recent approaches
+[30], [43] under the same settings.
+The proposed method demonstrates consistently strong ET
+segmentation across all evaluated modality configurations.
+This behavior is clinically relevant, as ET is the most critical
+tumor sub-region and the most sensitive to missing contrast-
+enhanced information. For TC segmentation, the proposed
+method remains competitive across all modality configura-
+tions, while WT accuracy shows limited variation across
+methods, indicating that coarse tumor extent can be reliably
+recovered even under incomplete modality inputs. We can also
+observe a consistent behavior across all evaluated methods
+from the results presented in Table I. In the presence of both
+FLAIR and T1ce modalities, segmentation accuracy remains
+comparable to the full-modality setting, even in the absence of
+T1, T2, or both. In contrast, removing T1ce leads to noticeable
+degradation in enhancing tumor (ET) and tumor core (TC)
+accuracy, whereas missing FLAIR primarily affects whole
+tumor (WT) segmentation, though to a lesser extent than the
+impact of missing T1ce.
+Despite the observed sensitivity of all methods to missing
+T1ce and FLAIR information, the proposed method exhibits
+improved segmentation accuracy under missing-T1ce and
+FLAIR conditions. Compared to the recent state of the art
+IM-Fuse method [40], the proposed method achieves higher
+ET accuracy, with approximately 1.5-2.0% absolute Dice
+improvements across multiple incomplete-modality configura-
+tions. For TC segmentation, the proposed method achieves 0.5-
+1.0% Dice gains across several missing-modality settings and
+remains competitive in the remaining configurations. Impor-
+tantly, these improvements are achieved with 2 million fewer
+parameters as compared to recent state of the art IM-Fuse
+method which has 47M.
+
+===== PAGE 8 =====
+
+8
+TABLE II: Quantitative results on BraTS 2023 Meningioma across different missing modalities. Each column corresponds
+to a specific missing-modality configuration. Gray squares indicate available MRI modalities, whereas white squares denote
+missing modalities. Dice Score (%) is reported for Whole Tumor (WT), Tumor Core (TC), and Enhancing Tumor (ET). Bold
+and underlined values represent the best and second-best results.
+Models
+Modality Configurations
+F T1
+T1c T2
+F T1
+T1c T2
+F T1
+T1c T2
+F T1
+T1c T2
+F T1
+T1c T2
+F T1
+T1c T2
+F T1
+T1c T2
+F T1
+T1c T2
+F T1
+T1c T2
+F T1
+T1c T2
+F T1
+T1c T2
+F T1
+T1c T2
+F T1
+T1c T2
+F T1
+T1c T2
+F T1
+T1c T2
+Whole Tumor Dice Score (%)
+mmForm [43]82.774.3 81.2 78.884.9 88.183.682.5 82.0 86.6 88.484.988.3 86.8 88.5IM-Fuse [40] 81.8 75.781.2 78.185.188.7 83.682.7 82.186.9 89.1 84.989.0 87.1 89.2Proposed 81.7 75.0 81.378.7 84.489.683.1 82.981.787.9 89.784.1 89.7 87.7 89.7
+Tumor Core Dice Score (%)
+mmForm [43]62.9 58.1 90.6 54.6 66.2 90.1 63.5 92.1 58.7 91.2 91.1 65.3 90.1 91.8 90.7IM-Fuse [40] 63.6 61.6 90.8 58.7 69.290.9 65.4 91.4 65.2 90.8 91.4 67.8 90.4 91.1 90.7Proposed 66.1 64.9 92.2 64.1 69.2 92.8 68.0 92.6 67.0 92.9 93.1 69.3 92.8 92.9 92.9
+Enhancing Tumor Dice Score (%)
+mmForm [43]43.8 41.9 90.0 46.3 49.2 89.6 52.4 91.3 49.6 90.4 90.6 54.1 89.5 91.0 90.1IM-Fuse [40] 49.2 50.389.9 48.3 56.789.8 54.4 90.3 55.8 89.5 90.3 57.2 89.2 89.9 89.7Proposed 45.8 48.1 91.2 55.654.0 92.0 57.2 91.5 58.5 91.9 92.1 57.3 91.9 92.0 92.1
+TABLE III: Detailed statistical comparison between the proposed method and IM-Fuse on BraTS 2023 Meningioma. Paired
+two-sided Wilcoxon signed-rank tests were performed using case-wise Dice scores under identical modality configurations.
+Reported values are rawpand FDR-correctedp FDR values.
+Configuration WT TC ET
+p p FDR p p FDR p p FDR
+F T1 T1c T2 0.2336 0.2695 0.0008 0.0011 0.0003 0.0004
+F T1 T1c T2 0.4920 0.5031 <0.0001<0.0001 <0.0001<0.0001
+F T1 T1c T2 0.0018 0.0024 0.0006 0.0009 0.0583 0.0691
+F T1 T1c T2 0.0124 0.0155 <0.0001<0.0001 <0.0001<0.0001
+F T1 T1c T2 <0.0001<0.0001 <0.0001<0.0001 <0.0001<0.0001
+F T1 T1c T2 0.3911 0.4190 <0.0001<0.0001 <0.0001<0.0001
+F T1 T1c T2 0.2616 0.2943 0.7732 0.7732 0.0001 0.0002
+F T1 T1c T2 0.2897 0.3179 0.0121 0.0155 0.0001 0.0002
+F T1 T1c T2 <0.0001<0.0001 0.0001 0.0002 0.0002 0.0003
+F T1 T1c T2 <0.0001<0.0001 <0.0001<0.0001 <0.0001<0.0001
+F T1 T1c T2 <0.0001<0.0001 <0.0001<0.0001 <0.0001<0.0001
+F T1 T1c T2 0.0203 0.0247 0.0031 0.0041 0.4209 0.4404
+F T1 T1c T2 <0.0001<0.0001 <0.0001<0.0001 <0.0001<0.0001
+F T1 T1c T2 <0.0001<0.0001 <0.0001<0.0001 <0.0001<0.0001
+F T1 T1c T2 <0.0001<0.0001 <0.0001<0.0001 <0.0001<0.0001
+To further evaluate cross-cohort generalization, we tested
+the proposed method on a selected subset of 279 cases from the
+BraTS 2023 Meningioma cohort under the same incomplete-
+modality settings, without any training or hyperparameter
+tuning etc. IM-Fuse and mmFormer methods were selected
+as comparative baselines because they demonstrated strong
+performance on the glioma benchmark dataset. All three
+methods were trained on the glioma cohort using the same
+
+===== PAGE 9 =====
+
+9
+MRI IM-Fuse Fusion 
+Feature Map
+Proposed Fusion (MMGF)
+Feature Map
+IM-Fuse Fusion
+Prediction
+Proposed Fusion (MMGF)
+Prediction Ground Truth
+Sample1Sample2
+MRI IM-Fuse Fusion 
+Feature Map
+Proposed Fusion (MMGF)
+Feature Map
+IM-Fuse Fusion
+Prediction
+Proposed Fusion (MMGF)
+Prediction Ground Truth
+Sample1Sample2
+Fig. 4: Qualitative results for two representative test cases: BraTS-GLI-00322-000 (top) and BraTS-GLI-00737-000 (bottom),
+illustrating the impact of MMGF compared to IM-Fuse fusion on intermediate feature representations and final predictions.
+The green, yellow, and red colors in the predictions represent edema (ED), enhancing tumor (ET), and necrotic core (NCR)
+respectively.
+experimental protocol, identical missing-modality configura-
+tions, and the same number of training epochs, and were
+subsequently evaluated on the meningioma test cases under
+the same evaluation protocol for fair comparison.
+The performance results for all the three methods on
+meningioma dataset are reported in Table II. The results
+show that the proposed method maintains robust performance
+under this cohort shift, with particularly consistent gains for
+the more challenging TC and ET regions as compared to
+the selected state of the art methods. These results indicate
+that the proposed method does not overfit to glioma-specific
+appearance, but instead learns generalized representations that
+remain effective when applied to a different tumor cohort.
+To validate the statistical significance of cross-cohort im-
+provements, we further performed paired two-sided Wilcoxon
+signed-rank tests against existing state of the art IM-Fuse
+method [67]. Specifically, Dice scores from the proposed
+method and IM-Fuse were paired across the same test cases
+for each modality configuration and tumor region. Since
+the analysis involved 45 comparisons, corresponding to 15
+modality configurations and three tumor regions (WT, TC, and
+ET), false discovery rate (FDR) correction was applied to the
+resultingp-values to account for multiple testing. The FDR-
+corrected p-value (p FDR) is reported in Table III, showing
+statistically significant improvements across multiple missing-
+modality configurations and tumor regions, with several com-
+parisons satisfyingp FDR <0.0001. These results support the
+consistency of the observed improvements under cross-cohort
+incomplete-modality evaluation.
+Beyond the quantitative improvements and subject-level
+statistical evidence, we further examine qualitative results to
+assess how the observed improvements translate into spatial
+segmentation quality. As shown in Fig. 4, the proposed MMGF
+improves both feature representations and final segmentation
+outputs. Compared with IM-Fuse-based fusion alone, which
+produces relatively diffuse activations within the tumor re-
+gion, MMGF yields more localized and contrast-enhanced
+responses, particularly in the ET area. This difference is
+reflected in the final predictions, where MMGF achieves better
+ET delineation and closer alignment with the ground truth
+than IM-Fuse. The qualitative comparison on the meningioma
+test cases is presented in Fig. 5, which further confirms the
+cross-cohort effectiveness of the proposed method. Compared
+with mmFormer and IM-Fuse, the proposed method provides
+closer agreement with the ground truth across all tumor sub-
+regions, where the baseline predictions show greater sub-
+region confusion.
+C. Ablation Study
+We conducted an ablation study on BraTS 2023 Glioma
+to evaluate the contribution of each component in the pro-
+posedD 3-Seg under a missing-T1ce setting (FLAIR and T1
+available), as summarized in Table IV. The model with only
+Mamba-based modality fusion achieves 91.6% WT, 79.4%
+TC, and 63.1% ET Dice, with comparatively lower ET per-
+formance. Multi-hop Modality Graph Fusion results in 0.6%,
+0.3% and 1.3% improvements in WT, TC and ET Dice,
+respectively, over the Mamba-based fusion-only configuration.
+Diffusion-based T1ce feature imputation leads to an additional
+0.4%, 0.6% and 1.1% gain in WT, TC and ET Dice. The
+completeD 3-Seg model, including error-guided refinement,
+achieves the best performance (92.6% WT, 80.8% TC, 65.9%
+ET), demonstrating the importance of these modules for im-
+proved segmentation under missing-modality conditions.
+To further evaluate the impact of diffusion-based feature
+imputation, we conducted an additional ablation under the
+available-T2 setting, where the missing T1ce and FLAIR latent
+features are progressively imputed. As shown in Table V,
+
+===== PAGE 10 =====
+
+10
+MRI mmFormer Pred IM-Fuse Pred Proposed Pred Ground Truth
+Sample1Sample2
+Fig. 5: Qualitative comparison of segmentation predictions for two representative BraTS 2023 Meningioma cases: BraTS-MEN-
+00669-000 (top) and BraTS-MEN-01009-000 (bottom). Columns show the input MRI, predictions from mmFormer, IM-Fuse,
+the proposed method, and the ground truth. The green, yellow, and red regions denote edema (ED), enhancing tumor (ET),
+and necrotic core (NCR), respectively.
+TABLE IV: Ablation study under missing-T1ce (FLAIR, T1 available).
+Model Modules Dice (%)
+Mamba Fusion MMGF Diffusion EGDR WT TC ET
+Proposed D 3 Seg
+✓× × × 91.6 79.4 63.1
+✓ ✓× × 92.2 79.7 64.4
+✓ ✓ ✓× 92.6 80.3 65.5
+✓ ✓ ✓ ✓ 92.6 80.8 65.9
+TABLE V: Ablation of diffusion-based feature imputation under the available-T2 setting. T1ce and FLAIR denote diffusion-
+imputed latent features. Reliability-guided revision denotes remasking and correction of unreliable tokens during the diffusion
+sampling process. Inference time is reported per test sample.
+Variant Imputed Features Reliability-guided Revision Dice (%) Efficiency
+T1ce FLAIR WT TC ET Time (s) GFLOPs
+No diffusion × × – 88.5 76.5 60.1 2.1 160
+T1ce imputation only ✓× ✓ 88.6 77.4 60.9 3.8 310
+FLAIR imputation only ×✓ ✓ 88.7 77.0 60.4 3.8 310
+T1ce + FLAIR imputation ✓ ✓ ✓ 88.7 77.7 61.2 4.7 420
+T1ce + FLAIR imputation ✓ ✓ × 88.4 77.2 60.8 4.2 360
+the model without diffusion-based imputation achieves 88.5%
+WT, 76.5% TC, and 60.1% ET Dice. Introducing T1ce feature
+imputation improves TC and ET Dice to 77.4% and 60.9%, re-
+spectively, indicating that recovering contrast-enhanced latent
+cues is particularly useful for tumor core and enhancing tumor
+delineation. In contrast, FLAIR feature imputation provides
+a slightly larger gain for WT, improving it from 88.5% to
+88.7%, while also improving TC and ET over the no-diffusion
+baseline.
+Joint T1ce+FLAIR feature imputation achieves the best
+overall performance, reaching 88.7% WT, 77.7% TC, and
+61.2% ET Dice. These results suggest that diffusion-based
+imputation contributes complementary missing-modality infor-
+mation. T1ce imputation mainly strengthens contrast-sensitive
+tumor sub-regions, whereas FLAIR imputation helps preserve
+broader tumor extent.
+The comparison between joint imputation with and without
+reliability-guided revision further shows that revising unreli-
+able diffusion tokens improves segmentation accuracy from
+88.4%, 77.2%, and 60.8% to 88.7,%, 77.7% and 61.2% for
+WT, TC and ET respectively at the cost of increased runtime
+and computational complexity. This indicates that reliability-
+guided revision improves the quality of imputed latent fea-
+tures, but introduces an accuracy–efficiency trade-off during
+inference.
+To further validate the effectiveness of reliability-guided
+revision, we conduct an ablation study under single-modality
+input settings, where only T1 or only T2 is available. Results
+for both BraTS 2023 Glioma and BraTS 2023 Meningioma
+are presented in Table VI. Under these settings, the diffusion
+model imputes the missing T1ce and FLAIR latent represen-
+
+===== PAGE 11 =====
+
+11
+TABLE VI: Effect of reliability-guided revision under single-modality settings on BraTS 2023 Meningioma and BraTS 2023
+Glioma. Results compare the proposed diffusion imputation module with and without remasking and revision during sampling.
+Dice Score (%) is reported for WT, TC, and ET.
+Dataset Available Modality Reliability-guided Revision Dice (%)
+WT TC ET
+Glioma
+T1 only × 82.2 76.1 58.7
+T1 only ✓ 82.5 76.6 59.3
+T2 only × 88.4 77.2 60.8
+T2 only ✓ 88.7 77.7 61.2
+Meningioma
+T1 only × 74.5 64.4 47.5
+T1 only ✓ 75.0 65.2 48.1
+T2 only × 78.4 63.7 55.1
+T2 only ✓ 78.7 64.1 55.6
+tations from a single observed MRI sequence. Therefore, the
+imputed tokens need to preserve tumor-relevant information
+for downstream segmentation. However, when only a single
+modality is available, some imputed tokens may become
+less stable across diffusion sampling steps. Reliability-guided
+revision addresses this issue by remasking and correcting
+unreliable tokens during sampling. This targeted correction
+is reflected in the ablation results, where reliability-guided
+revision improves downstream segmentation accuracy across
+both datasets. On Glioma, it improves WT, TC, and ET Dice
+by 0.3%, 0.5%, and 0.4-0.6% respectively. On Meningioma,
+the corresponding gains are 0.3-0.5%, 0.4-0.8%, and 0.5-0.6%
+for WT, TC, and ET respectively.
+V. CONCLUSION
+We proposed a novelD 3-Seg model for brain tumor seg-
+mentation under missing-modality conditions. The proposed
+model comprises a new multi-hop modality graph fusion
+mechanism and a lightweight diffusion-based module to im-
+pute critical T1ce and FLAIR features, together with error-
+guided refinement to enhance tumor subregion delineation.
+Experiments on BraTS 2023 Glioma demonstrate consistent
+performance gains across WT, TC, and ET under diverse
+missing-modality configurations. To further assess generaliza-
+tion beyond the primary training cohort, we evaluated the
+trained model on a subset of the external BraTS 2023 Menin-
+gioma cohort, which was used exclusively for testing only.
+Results on this external cohort show that the proposed D 3Seg
+maintains superior segmentation performance compared with
+state-of-the-art methods under incomplete-modality settings.
+These findings highlight the effectiveness of combining graph-
+based fusion and modality feature imputation for improved
+segmentation with missing modalities.
+REFERENCES
+[1] B. H. Menze, A. Jakab, S. Bauer, J. Kalpathy-Cramer, K. Farahani,
+J. Kirby, Y . Burren, N. Porz, J. Slotboom, R. Wiestet al., “The
+multimodal brain tumor image segmentation benchmark (brats),”IEEE
+transactions on medical imaging, vol. 34, no. 10, pp. 1993–2024, 2014.
+[2] T. Zhou, S. Canu, P. Vera, and S. Ruan, “Latent correlation representa-
+tion learning for brain tumor segmentation with missing mri modalities,”
+IEEE Transactions on Image Processing, vol. 30, pp. 4263–4274, 2021.
+[3] S. Bakas, H. Akbari, A. Sotiras, M. Bilello, M. Rozycki, J. S. Kirby,
+J. B. Freymann, K. Farahani, and C. Davatzikos, “Advancing the cancer
+genome atlas glioma mri collections with expert segmentation labels and
+radiomic features,”Scientific data, vol. 4, no. 1, pp. 1–13, 2017.
+[4] Y . Wang, Y . Zhang, Y . Liu, Z. Lin, J. Tian, C. Zhong, Z. Shi, J. Fan,
+and Z. He, “Acn: Adversarial co-training network for brain tumor
+segmentation with missing modalities,” inMICCAI. Springer, 2021,
+pp. 410–420.
+[5] M. Sharma and N. Miglani, “Automated brain tumor segmentation in
+mri images using deep learning: overview, challenges and future,”Deep
+learning techniques for biomedical and health informatics, pp. 347–383,
+2019.
+[6] M. Akil, R. Saouli, R. Kachouriet al., “Fully automatic brain tumor
+segmentation with deep learning-based selective attention using over-
+lapping patches and multi-class weighted cross-entropy,”Medical image
+analysis, vol. 63, p. 101692, 2020.
+[7] P. Wang and A. C. Chung, “Relax and focus on brain tumor segmenta-
+tion,”Medical image analysis, vol. 75, p. 102259, 2022.
+[8] M. Havaei, A. Davy, D. Warde-Farley, A. Biard, A. Courville, Y . Bengio,
+C. Pal, P.-M. Jodoin, and H. Larochelle, “Brain tumor segmentation with
+deep neural networks,”Medical image analysis, vol. 35, pp. 18–31, 2017.
+[9] D. She, Y . Zhang, Z. Zhang, H. Li, Z. Yan, and X. Sun, “Eoformer:
+Edge-oriented transformer for brain tumor segmentation,” inInterna-
+tional Conference on Medical Image Computing and Computer-Assisted
+Intervention. Springer, 2023, pp. 333–343.
+[10] D. Ali, A. Mian, N. Akhtar, and G. M. Hassan, “Attention-guided vector
+quantized variational autoencoder for brain tumor segmentation,” in
+International Conference on Medical Image Computing and Computer-
+Assisted Intervention. Springer, 2025, pp. 66–76.
+[11] ——, “Drbd-mamba for robust and efficient brain tumor segmentation
+with analytical insights,”arXiv preprint arXiv:2510.14383, 2025.
+[12] T. Zhou, S. Ruan, and B. Lei, “Bufnet: Boundary-aware and uncertainty-
+driven multi-modal fusion network for mr brain tumor segmentation,”
+Medical Image Analysis, p. 103855, 2025.
+[13] T. Zhou, Z. Wang, S. Ruan, Y . Meng, J. Duan, and B. Lei, “Dfuse-net:
+Disentangled feature fusion with uncertainty-aware learning for reliable
+multi-modal brain tumor segmentation,”Medical Image Analysis, p.
+103923, 2025.
+[14] S. Zhu, Y . Chen, W. Chen, S. Jiang, G. Zhou, Y . Wang, F. Qin, C. Wang,
+and Q. Tian, “No modality left behind: Adapting to missing modalities
+via knowledge distillation for brain tumor segmentation,”arXiv preprint
+arXiv:2509.15017, 2025.
+[15] Z. Liu, J. Wei, R. Li, and J. Zhou, “Sfusion: Self-attention based n-to-
+one multimodal fusion block,” inInternational conference on medical
+image computing and computer-assisted intervention. Springer, 2023,
+pp. 159–169.
+[16] H. Li, Z. Li, Y . Mao, Z. Ding, and Z. Huang, “Dc-seg: Disentangled con-
+trastive learning for brain tumor segmentation with missing modalities,”
+inMICCAI. Springer, 2025, pp. 138–148.
+[17] H. Wang, Y . Chen, C. Ma, J. Avery, L. Hull, and G. Carneiro,
+“Multi-modal learning with missing modality via shared-specific feature
+modelling,” inCVPR, 2023, pp. 15 878–15 887.
+[18] Y . Shi, M. Xue, Y . Zeng, J. Zhang, J. Wan, and Y . Zhou, “Fedamm:
+Federated learning for brain tumor segmentation with arbitrary missing
+modalities,” inMICCAI. Springer, 2025, pp. 203–213.
+[19] J. Wang, L. Fan, W. Jing, D. Di, Y . Song, S. Liu, and C. Cong,
+“Hypergraph tversky-aware domain incremental learning for brain tumor
+segmentation with missing modalities,” inMICCAI. Springer, 2025, pp.
+283–293.
+[20] M. Havaei, N. Guizard, N. Chapados, and Y . Bengio, “Hemis: Hetero-
+modal image segmentation,” inMICCAI. Springer, 2016, pp. 469–477.
+
+===== PAGE 12 =====
+
+12
+[21] C. Chen, Q. Dou, Y . Jin, H. Chen, J. Qin, and P.-A. Heng, “Robust
+multimodal brain tumor segmentation via feature disentanglement and
+gated fusion,” inMICCAI. Springer, 2019, pp. 447–456.
+[22] Z. Wang and Y . Hong, “A2fseg: Adaptive multi-modal fusion network
+for medical image segmentation,” inMICCAI. Springer, 2023, pp.
+673–681.
+[23] T. Zhou, P. Vera, S. Canu, and S. Ruan, “Missing data imputation
+via conditional generator and correlation learning for multimodal brain
+tumor segmentation,”Pattern Recognition Letters, vol. 158, pp. 125–
+132, 2022.
+[24] L. Qi, Y . Liu, Y . Li, W. Shi, G. Feng, and Z. Jiang, “A unified
+missing modality imputation model with inter-modality contrastive and
+consistent learning,” inMICCAI. Springer, 2025, pp. 44–53.
+[25] X. Zhang, J. Liang, P. Cao, J. Yang, and O. R. Zaiane, “Structure-
+aware mri translation: Multi-modal latent diffusion model with arbitrary
+missing modalities,” inMICCAI. Springer, 2025, pp. 508–518.
+[26] T. Zhou, S. Canu, P. Vera, and S. Ruan, “Brain tumor segmentation with
+missing modalities via latent multi-source correlation representation,” in
+MICCAI. Springer, 2020, pp. 533–541.
+[27] ——, “Feature-enhanced generation and multi-modality fusion based
+deep neural network for brain tumor segmentation with missing mr
+modalities,”Neurocomputing, vol. 466, pp. 102–112, 2021.
+[28] H. Xiong, Y . Wang, Z. Shen, K. Sun, Y . Fang, Y . Chen, D. Shen, and
+Q. Wang, “Learning contrast and content representations for synthe-
+sizing magnetic resonance image of arbitrary contrast,”Medical Image
+Analysis, vol. 104, p. 103635, 2025.
+[29] R. Dorent, S. Joutard, M. Modat, S. Ourselin, and T. Vercauteren,
+“Hetero-modal variational encoder-decoder for joint modality comple-
+tion and segmentation,” inMICCAI. Springer, 2019, pp. 74–82.
+[30] H. Liu, D. Wei, D. Lu, J. Sun, L. Wang, and Y . Zheng, “M3ae:
+Multimodal representation learning for brain tumor segmentation with
+missing modalities,” inAAAI, vol. 37, no. 2, 2023, pp. 1657–1665.
+[31] Z. Zeng, Z. Peng, X. Yang, and W. Shen, “Missing as masking: Arbitrary
+cross-modal feature reconstruction for incomplete multimodal brain
+tumor segmentation,” inMICCAI. Springer, 2024, pp. 424–433.
+[32] Y . Zhu, K. Li, L. Yu, and P.-A. Heng, “Tackling missing modalities with
+memory-efficient modality-complementary prompt learning for robust
+brain tumor segmentation,”Expert Systems with Applications, p. 130976,
+2025.
+[33] H. Wang, C. Ma, J. Zhang, Y . Zhang, J. Avery, L. Hull, and G. Carneiro,
+“Learnable cross-modal knowledge distillation for multi-modal learning
+with missing modality,” inMICCAI. Springer, 2023, pp. 216–226.
+[34] S. Zhu, Y . Chen, W. Chen, Y . Wang, C. Liu, S. Jiang, F. Qin,
+and C. Wang, “Bridging the gap in missing modalities: Leveraging
+knowledge distillation and style matching for brain tumor segmentation,”
+inMICCAI. Springer, 2025, pp. 95–106.
+[35] Y . Choi, M. A. Al-Masni, K.-J. Jung, R.-E. Yoo, S.-Y . Lee, and D.-H.
+Kim, “A single stage knowledge distillation network for brain tumor
+segmentation on limited mr image modalities,”Computer Methods and
+Programs in Biomedicine, vol. 240, p. 107644, 2023.
+[36] A. Dosovitskiy, L. Beyer, A. Kolesnikov, D. Weissenborn, X. Zhai,
+T. Unterthiner, M. Dehghani, M. Minderer, G. Heigold, S. Gellyet al.,
+“An image is worth 16x16 words: Transformers for image recognition
+at scale,” inICLR, 2020.
+[37] A. Gu and T. Dao, “Mamba: Linear-time sequence modeling with
+selective state spaces,” inFirst conference on language modeling, 2024.
+[38] Z. Xing, T. Ye, Y . Yang, D. Cai, B. Gai, X.-J. Wu, F. Gao, and L. Zhu,
+“Segmamba-v2: Long-range sequential modeling mamba for general 3d
+medical image segmentation,”IEEE Transactions on Medical Imaging,
+2025.
+[39] Z. Zhang, G. Yang, Y . Zhang, H. Yue, A. Liu, Y . Ou, J. Gong,
+and X. Sun, “Tmformer: Token merging transformer for brain tumor
+segmentation with missing modalities,” inAAAI, vol. 38, no. 7, 2024,
+pp. 7414–7422.
+[40] V . Pipoli, A. Saporita, K. Marchesini, C. Grana, E. Ficarra, and
+F. Bolelli, “Im-fuse: A mamba-based fusion block for brain tumor
+segmentation with incomplete modalities,” inMICCAI. Springer, 2025,
+pp. 225–235.
+[41] U. Baid, S. Ghodasara, S. Mohan, M. Bilello, E. Calabrese, E. Colak,
+K. Farahani, J. Kalpathy-Cramer, F. C. Kitamura, S. Patiet al., “The
+rsna-asnr-miccai brats 2021 benchmark on brain tumor segmentation and
+radiogenomic classification,”arXiv preprint arXiv:2107.02314, 2021.
+[42] D. LaBella, M. Adewole, M. Alonso-Basanta, T. Altes, S. M. Anwar,
+U. Baid, T. Bergquist, R. Bhalerao, S. Chen, V . Chunget al., “The asnr-
+miccai brain tumor segmentation (brats) challenge 2023: Intracranial
+meningioma,”arXiv preprint arXiv:2305.07642, 2023.
+[43] Y . Zhang, N. He, J. Yang, Y . Li, D. Wei, Y . Huang, Y . Zhang,
+Z. He, and Y . Zheng, “mmformer: Multimodal medical transformer
+for incomplete multimodal learning of brain tumor segmentation,” in
+MICCAI. Springer, 2022, pp. 107–117.
+[44] Z. Liu, L. Tong, L. Chen, Z. Jiang, F. Zhou, Q. Zhang, X. Zhang, Y . Jin,
+and H. Zhou, “Deep learning based brain tumor segmentation: a survey,”
+Complex & intelligent systems, vol. 9, no. 1, pp. 1001–1026, 2023.
+[45] J. Wu, D. Guo, L. Wang, S. Yang, Y . Zheng, J. Shapey, T. Vercauteren,
+S. Bisdas, R. Bradford, S. Saeedet al., “Tiss-net: Brain tumor image
+synthesis and segmentation using cascaded dual-task networks and error-
+prediction consistency,”Neurocomputing, vol. 544, p. 126295, 2023.
+[46] A. Shaarawy, G. Khoriba, and E. A. Rashed, “Modanet: Synthesizing
+missing mri sequences with gans using patch-based discrimination,” in
+2025 7th Novel Intelligent and Leading Emerging Sciences Conference
+(NILES). IEEE, 2025, pp. 548–552.
+[47] Y . Zhu, S. Wang, Y . Hu, X. Ma, Y . Qin, and J. Xie, “Drm-vae: A dual
+residual multi variational auto-encoder for brain tumor segmentation
+with missing modalities,” in2021 IEEE 4th International Conference
+on Electronics and Communication Engineering (ICECE). IEEE, 2021,
+pp. 82–86.
+[48] R. Dorent, “Unified brain mri synthesis with mixture of multimodal
+hierarchical vaes (brasyn 2025),” inInternational Conference on Medical
+Image Computing and Computer-Assisted Intervention. Springer, 2025,
+pp. 3–14.
+[49] A. Sharma and G. Hamarneh, “Missing mri pulse sequence synthesis
+using multi-modal generative adversarial network,”IEEE transactions
+on medical imaging, vol. 39, no. 4, pp. 1170–1183, 2019.
+[50] G. M. Conte, A. D. Weston, D. C. V ogelsang, K. A. Philbrick, J. C. Cai,
+M. Barbera, F. Sanvito, D. H. Lachance, R. B. Jenkins, W. O. Tobin
+et al., “Generative adversarial networks to synthesize missing t1 and
+flair mri sequences for use in a multisequence brain tumor segmentation
+model,”Radiology, vol. 299, no. 2, pp. 313–323, 2021.
+[51] A. Al-Fakih, A. Shazly, A. Mohammed, M. Elbushnaq, K. Ryu, Y . H.
+Gu, M. A. Al-masni, and M. M. Makary, “Flair mri sequence synthe-
+sis using squeeze attention generative model for reliable brain tumor
+segmentation,”Alexandria Engineering Journal, vol. 99, pp. 108–123,
+2024.
+[52] X. Meng, K. Sun, J. Xu, X. He, and D. Shen, “Multi-modal modality-
+masked diffusion network for brain mri synthesis with random modality
+missing,”IEEE Transactions on Medical Imaging, vol. 43, no. 7, pp.
+2587–2598, 2024.
+[53] Z. Dorjsembe, H.-K. Pao, S. Odonchimed, and F. Xiao, “Conditional
+diffusion models for semantic 3d brain mri synthesis,”IEEE Journal
+of Biomedical and Health Informatics, vol. 28, no. 7, pp. 4084–4093,
+2024.
+[54] L. Jiang, Y . Mao, X. Wang, X. Chen, and C. Li, “Cola-diff: Conditional
+latent diffusion model for multi-modal mri synthesis,” inInternational
+Conference on Medical Image Computing and Computer-Assisted Inter-
+vention. Springer, 2023, pp. 398–408.
+[55] S. Dayarathna, K. T. Islam, S. Uribe, G. Yang, M. Hayat, and Z. Chen,
+“Deep learning based synthesis of mri, ct and pet: Review and analysis,”
+Medical image analysis, vol. 92, p. 103046, 2024.
+[56] Y . Zhou, Z. Liu, X. Xie, H. Li, W. Zhu, Z. Zhang, Y . Suo, X. Meng,
+J. Cheng, H. Xuet al., “Stroke-aware cyclegan: Improving low-field
+mri image quality for accurate stroke assessment,”IEEE Transactions
+on Medical Imaging, 2025.
+[57] G. Liang, Q. Zhou, Z. Wang, J. Chen, L. Gu, C. Yao, S. Wu, B. Huang,
+and K. Chen, “Semantic-guided masked mutual learning for multi-
+modal brain tumor segmentation with arbitrary missing modalities,” in
+Proceedings of the AAAI Conference on Artificial Intelligence, vol. 39,
+no. 5, 2025, pp. 5137–5145.
+[58] K. Pani and I. Chawla, “A hybrid approach for multi modal brain tumor
+segmentation using two phase transfer learning, ssl and a hybrid 3dunet,”
+Computers and Electrical Engineering, vol. 118, p. 109418, 2024.
+[59] Y . Zhuang, H. Liu, E. Song, and C.-C. Hung, “A 3d cross-modality
+feature interaction network with volumetric feature alignment for brain
+tumor and tissue segmentation,”IEEE Journal of Biomedical and Health
+Informatics, vol. 27, no. 1, pp. 75–86, 2022.
+[60] Y . Lu, Y . Chang, Z. Zheng, Y . Sun, M. Zhao, B. Yu, C. Tian, and
+Y . Zhang, “Gmetanet: Multi-scale ghost convolutional neural network
+with auxiliary metaformer decoding path for brain tumor segmentation,”
+Biomedical Signal Processing and Control, vol. 83, p. 104694, 2023.
+[61] S. Karimijafarbigloo, R. Azad, A. Kazerouni, S. Ebadollahi, and D. Mer-
+hof, “Mmcformer: Missing modality compensation transformer for brain
+tumor segmentation,” inMedical imaging with deep learning. PMLR,
+2024, pp. 1144–1162.
+
+===== PAGE 13 =====
+
+13
+[62] A. Konwer, X. Hu, J. Bae, X. Xu, C. Chen, and P. Prasanna, “Enhancing
+modality-agnostic representations via meta-learning for brain tumor
+segmentation,” inProceedings of the IEEE/CVF international conference
+on computer vision, 2023, pp. 21 415–21 425.
+[63] M. Kang, F. F. Ting, S. N. Saw, R. C.-W. Phan, Z. Ge, and C.-
+M. Ting, “A multimodal feature distillation with mamba-transformer
+network for brain tumor segmentation with incomplete modalities,”
+IEEE Transactions on Artificial Intelligence, 2026.
+[64] S. Zhu, Y . Chen, S. Jiang, W. Chen, C. Liu, Y . Wang, X. Chen,
+Y . Ke, F. Qin, C. Wanget al., “Xlstm-hved: Cross-modal brain tumor
+segmentation and mri reconstruction method using vision xlstm and het-
+eromodal variational encoder-decoder,” in2025 IEEE 22nd international
+symposium on biomedical imaging (ISBI). IEEE, 2025, pp. 1–5.
+[65] S. Lin, B. Liu, J. Li, and X. Yang, “Common diffusion noise schedules
+and sample steps are flawed,” inWACV, 2024, pp. 5404–5411.
+[66] K. Zhai, S. Mollah, Z. Wang, and M. Shah, “Core: Context-
+robust remasking for diffusion language models,”arXiv preprint
+arXiv:2602.04096, 2026.
+[67] J. Dem ˇsar, “Statistical comparisons of classifiers over multiple data sets,”
+Journal of Machine learning research, vol. 7, no. Jan, pp. 1–30, 2006.
