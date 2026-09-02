@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import json
+from collections import Counter
 from pathlib import Path
 from typing import Dict, Sequence
 
@@ -117,6 +118,93 @@ def run_epoch(model, loader, device, criterion=None, optimizer=None, grad_clip: 
     metrics = _append_optional_stats(metrics, stage_stats)
     metrics = _append_classifier_info(metrics, model)
     return metrics
+
+
+def run_dual_view_epoch(
+    model,
+    loader,
+    device,
+    criterion,
+    optimizer,
+    lambda_missing: float = 1.0,
+    grad_clip: float | None = None,
+    threshold: float = 0.5,
+    desc: str = "dual-view train",
+):
+    """Train on same-subject full/missing views while sharing the loaded image and ROI tensors."""
+    model.train(True)
+    total_loss = 0.0
+    total_full_loss = 0.0
+    total_missing_loss = 0.0
+    y_true, full_prob, missing_prob = [], [], []
+    stage_stats = []
+
+    group_candidates = loader.dataset.targeted_missing_groups()
+    subgroup_counts = Counter({name: 0 for name in group_candidates})
+    pattern_counts = Counter({"_".join(combo): 0 for combos in group_candidates.values() for combo in combos})
+
+    for batch in tqdm(loader, desc=desc, leave=False):
+        if "missing_available_modalities" not in batch:
+            raise RuntimeError("Dual-view training batch is missing the targeted availability mask.")
+        batch = move_batch_to_device(batch, device)
+        missing_mask = batch["missing_available_modalities"].float()
+        broadcast_shape = [missing_mask.shape[0], missing_mask.shape[1]] + [1] * (batch["images"].ndim - 2)
+        missing_batch = dict(batch)
+        missing_batch["images"] = batch["images"] * missing_mask.view(*broadcast_shape)
+        missing_batch["available_modalities"] = missing_mask
+        missing_batch["combo"] = batch["missing_combo"]
+
+        optimizer.zero_grad()
+        full_output = model(batch)
+        missing_output = model(missing_batch)
+        full_loss = criterion(full_output["logits"], batch["label"])
+        missing_loss = criterion(missing_output["logits"], batch["label"])
+        loss = full_loss + float(lambda_missing) * missing_loss
+        loss.backward()
+        if grad_clip is not None and grad_clip > 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+        optimizer.step()
+
+        batch_size = batch["label"].shape[0]
+        total_loss += float(loss.item()) * batch_size
+        total_full_loss += float(full_loss.item()) * batch_size
+        total_missing_loss += float(missing_loss.item()) * batch_size
+        y_true.extend(batch["label"].detach().cpu().tolist())
+        full_prob.extend(full_output["prob"].detach().cpu().tolist())
+        missing_prob.extend(missing_output["prob"].detach().cpu().tolist())
+        if "stage_stats" in missing_output:
+            stage_stats.extend(missing_output["stage_stats"].detach().cpu().tolist())
+        subgroup_counts.update(batch["targeted_subgroup"])
+        pattern_counts.update("_".join(combo) for combo in batch["missing_combo"])
+
+    num_samples = max(len(loader.dataset), 1)
+    metrics = compute_binary_metrics(y_true, missing_prob, threshold=threshold)
+    full_metrics = compute_binary_metrics(y_true, full_prob, threshold=threshold)
+    metrics.update({f"full_{name}": value for name, value in full_metrics.items()})
+    metrics["loss"] = total_loss / num_samples
+    metrics["loss_full"] = total_full_loss / num_samples
+    metrics["loss_missing"] = total_missing_loss / num_samples
+    metrics["lambda_missing"] = float(lambda_missing)
+    metrics = _append_optional_stats(metrics, stage_stats)
+    metrics = _append_classifier_info(metrics, model)
+
+    sampled_total = sum(subgroup_counts.values())
+    cfg = getattr(loader.dataset, "curriculum_config", {})
+    configured_ratios = {
+        "full": float(cfg.get("targeted_ratio_full", 0.30)),
+        "t1ce_absent_t2_present": float(cfg.get("targeted_ratio_t1ce_absent_t2_present", 0.25)),
+        "t2_absent_t1ce_present": float(cfg.get("targeted_ratio_t2_absent_t1ce_present", 0.25)),
+        "t1ce_t2_both_absent": float(cfg.get("targeted_ratio_t1ce_t2_both_absent", 0.20)),
+    }
+    sampling = {
+        "num_samples": sampled_total,
+        "configured_ratios": configured_ratios,
+        "subgroup_counts": dict(subgroup_counts),
+        "subgroup_frequencies": {name: count / max(sampled_total, 1) for name, count in subgroup_counts.items()},
+        "pattern_counts": dict(pattern_counts),
+        "pattern_frequencies": {name: count / max(sampled_total, 1) for name, count in pattern_counts.items()},
+    }
+    return {"metrics": metrics, "sampling": sampling}
 
 
 @torch.no_grad()

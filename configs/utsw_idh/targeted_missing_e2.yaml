@@ -1,0 +1,13 @@
+base_config: "missing_aware_train.yaml"
+
+output_dir: outputs/utsw_idh/targeted_missing_e2_seed42
+
+train:
+  mode: targeted_dual_view_train
+  dual_view_enabled: true
+  lambda_missing: 1.0
+  targeted_ratio_full: 0.30
+  targeted_ratio_t1ce_absent_t2_present: 0.25
+  targeted_ratio_t2_absent_t1ce_present: 0.25
+  targeted_ratio_t1ce_t2_both_absent: 0.20
+

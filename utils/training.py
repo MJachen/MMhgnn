@@ -113,7 +113,7 @@ def brats_collate_fn(batch):
     collated = {}
     for key in batch[0].keys():
         values = [item[key] for item in batch]
-        if key in {"case_id", "patient_id", "combo"}:
+        if key in {"case_id", "patient_id", "combo", "missing_combo", "targeted_subgroup"}:
             collated[key] = values
         elif torch.is_tensor(values[0]) and values[0].dim() >= 3:
             collated[key] = _pad_tensor_list(values)

@@ -15,7 +15,7 @@ from utils import load_config, set_seed, setup_logger
 from utils.config import ensure_dir
 from utils.io import load_json, save_json
 from utils.metrics import build_drop_t1_ablation_report, calibrate_grouped_3way_t1ce_t1, calibrate_threshold, compute_binary_metrics, summarize_missing_pattern_metrics, threshold_dispatch_for_combo, threshold_for_combo
-from utils.runner import collect_predictions, evaluate_with_explanations, run_epoch
+from utils.runner import collect_predictions, evaluate_with_explanations, run_dual_view_epoch, run_epoch
 from utils.training import build_dataloader, build_datasets, build_sampler, class_weights_from_records, dump_split_summary
 from utils.visualization import save_fusion_weight_history
 
@@ -127,9 +127,17 @@ def main():
 
     missing_val_cfg = config.get("missing_aware_validation", {})
     missing_val_enabled = bool(missing_val_cfg.get("enabled", False))
+    dual_view_enabled = bool(config["train"].get("dual_view_enabled", False))
+    if dual_view_enabled and config["train"].get("mode") != "targeted_dual_view_train":
+        raise ValueError("Dual-view training requires train.mode=targeted_dual_view_train.")
+    if config["train"].get("mode") == "targeted_dual_view_train" and not dual_view_enabled:
+        raise ValueError("targeted_dual_view_train requires train.dual_view_enabled=true.")
+    lambda_missing = float(config["train"].get("lambda_missing", 1.0))
+    if lambda_missing < 0:
+        raise ValueError("train.lambda_missing must be non-negative.")
     if missing_val_enabled:
-        if config["train"].get("mode") != "missing_curriculum_train":
-            raise ValueError("15-pattern model selection is reserved for missing_curriculum_train runs.")
+        if config["train"].get("mode") not in {"missing_curriculum_train", "targeted_dual_view_train"}:
+            raise ValueError("15-pattern model selection requires a missing-aware training mode.")
         if config.get("calibration", {}).get("threshold_mode", "global") != "global":
             raise ValueError("Missing-aware training permits exactly one global validation-calibrated threshold.")
         if config["train"].get("enable_targeted_finetune", False):
@@ -185,6 +193,20 @@ def main():
         optimizer.load_state_dict(resume_checkpoint["optimizer"])
         if int(resume_checkpoint.get("seed", config["seed"])) != int(config["seed"]):
             raise RuntimeError("Resume checkpoint seed does not match the requested run seed.")
+        if dual_view_enabled:
+            saved_train_config = resume_checkpoint.get("config", {}).get("train", {})
+            dual_view_resume_keys = [
+                "mode",
+                "dual_view_enabled",
+                "lambda_missing",
+                "targeted_ratio_full",
+                "targeted_ratio_t1ce_absent_t2_present",
+                "targeted_ratio_t2_absent_t1ce_present",
+                "targeted_ratio_t1ce_t2_both_absent",
+            ]
+            mismatched = [key for key in dual_view_resume_keys if saved_train_config.get(key) != config["train"].get(key)]
+            if mismatched:
+                raise RuntimeError(f"Resume checkpoint does not match the E2 dual-view protocol: {mismatched}")
         fingerprint_path = config.get("data", {}).get("manifest_fingerprint_json")
         current_fingerprint = load_json(fingerprint_path).get("canonical_manifest_sha256") if fingerprint_path and Path(fingerprint_path).is_file() else None
         saved_fingerprint = resume_checkpoint.get("canonical_manifest_sha256")
@@ -205,16 +227,34 @@ def main():
     for epoch in range(start_epoch, total_epochs + 1):
         if hasattr(train_ds, "set_epoch"):
             train_ds.set_epoch(epoch, int(config["train"]["epochs"]), config["train"])
-        train_metrics = run_epoch(
-            model,
-            train_loader,
-            device,
-            criterion=criterion,
-            optimizer=optimizer,
-            grad_clip=config["train"].get("grad_clip", 0.0),
-            threshold=config["eval"].get("threshold", 0.5),
-            desc=f"train {epoch}",
-        )
+        sampling_report = None
+        if dual_view_enabled:
+            dual_result = run_dual_view_epoch(
+                model,
+                train_loader,
+                device,
+                criterion=criterion,
+                optimizer=optimizer,
+                lambda_missing=lambda_missing,
+                grad_clip=config["train"].get("grad_clip", 0.0),
+                threshold=config["eval"].get("threshold", 0.5),
+                desc=f"dual-view train {epoch}",
+            )
+            train_metrics = dual_result["metrics"]
+            sampling_report = dual_result["sampling"]
+            save_json(sampling_report, metrics_dir / f"train_sampling_epoch_{epoch:03d}.json")
+            logger.info("Epoch %d | targeted sampling=%s", epoch, json.dumps(sampling_report["subgroup_frequencies"], ensure_ascii=False))
+        else:
+            train_metrics = run_epoch(
+                model,
+                train_loader,
+                device,
+                criterion=criterion,
+                optimizer=optimizer,
+                grad_clip=config["train"].get("grad_clip", 0.0),
+                threshold=config["eval"].get("threshold", 0.5),
+                desc=f"train {epoch}",
+            )
         val_metrics = run_epoch(
             model,
             val_loader,
@@ -265,7 +305,10 @@ def main():
             if score != score:
                 score = val_metrics.get("bal_acc", 0.0)
 
-        history.append({"epoch": epoch, "train": train_metrics, "val": val_metrics})
+        history_item = {"epoch": epoch, "train": train_metrics, "val": val_metrics}
+        if sampling_report is not None:
+            history_item["sampling"] = sampling_report
+        history.append(history_item)
         logger.info("Epoch %d | train=%s | val=%s", epoch, json.dumps(train_metrics, ensure_ascii=False), json.dumps(val_metrics, ensure_ascii=False))
 
         improved = False
@@ -371,6 +414,29 @@ def main():
         history_rows.append(row)
     history_df = pd.DataFrame(history_rows)
     history_df.to_csv(metrics_dir / "train_history.csv", index=False)
+    sampling_subgroup_rows = []
+    sampling_pattern_rows = []
+    for item in history:
+        sampling = item.get("sampling")
+        if not sampling:
+            continue
+        for name, count in sampling["subgroup_counts"].items():
+            sampling_subgroup_rows.append(
+                {
+                    "epoch": item["epoch"],
+                    "subgroup": name,
+                    "count": count,
+                    "frequency": sampling["subgroup_frequencies"][name],
+                    "configured_ratio": sampling["configured_ratios"][name],
+                }
+            )
+        for name, count in sampling["pattern_counts"].items():
+            sampling_pattern_rows.append(
+                {"epoch": item["epoch"], "pattern": name, "count": count, "frequency": sampling["pattern_frequencies"][name]}
+            )
+    if sampling_subgroup_rows:
+        pd.DataFrame(sampling_subgroup_rows).to_csv(metrics_dir / "train_sampling_subgroups.csv", index=False)
+        pd.DataFrame(sampling_pattern_rows).to_csv(metrics_dir / "train_sampling_patterns.csv", index=False)
     fusion_plot_df = pd.DataFrame({"epoch": history_df["epoch"]})
     for col in ["val_alpha", "val_beta", "val_gamma"]:
         if col in history_df.columns:

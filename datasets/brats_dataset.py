@@ -365,6 +365,61 @@ class BraTSClassificationDataset(Dataset):
                 return combo
         return tuple(self.all_modalities)
 
+    def targeted_missing_groups(self) -> Dict[str, List[Tuple[str, ...]]]:
+        """Return the four legal E2 sampling groups drawn from the existing non-empty combinations."""
+        full_combo = tuple(self.all_modalities)
+        groups = {
+            "full": [full_combo],
+            "t1ce_absent_t2_present": [],
+            "t2_absent_t1ce_present": [],
+            "t1ce_t2_both_absent": [],
+        }
+        for combo in self.all_combos:
+            combo_set = set(combo)
+            if combo == full_combo:
+                continue
+            if "t1ce" not in combo_set and "t2" in combo_set:
+                groups["t1ce_absent_t2_present"].append(tuple(combo))
+            elif "t2" not in combo_set and "t1ce" in combo_set:
+                groups["t2_absent_t1ce_present"].append(tuple(combo))
+            elif "t1ce" not in combo_set and "t2" not in combo_set:
+                groups["t1ce_t2_both_absent"].append(tuple(combo))
+        return groups
+
+    def _targeted_subgroup_for_combo(self, combo: Sequence[str]) -> str:
+        combo = tuple(combo)
+        for group_name, candidates in self.targeted_missing_groups().items():
+            if combo in candidates:
+                return group_name
+        raise ValueError(f"Combo {combo} does not belong to an E2 targeted sampling subgroup.")
+
+    def _sample_targeted_missing_combo(self) -> Tuple[str, Tuple[str, ...]]:
+        groups = self.targeted_missing_groups()
+        cfg = self.curriculum_config
+        weighted_groups = [
+            ("full", float(cfg.get("targeted_ratio_full", 0.30))),
+            ("t1ce_absent_t2_present", float(cfg.get("targeted_ratio_t1ce_absent_t2_present", 0.25))),
+            ("t2_absent_t1ce_present", float(cfg.get("targeted_ratio_t2_absent_t1ce_present", 0.25))),
+            ("t1ce_t2_both_absent", float(cfg.get("targeted_ratio_t1ce_t2_both_absent", 0.20))),
+        ]
+        if any(weight < 0 for _, weight in weighted_groups):
+            raise ValueError("E2 targeted sampling ratios must be non-negative.")
+        if any(weight > 0 and not groups[name] for name, weight in weighted_groups):
+            raise ValueError("E2 targeted sampling requested a subgroup with no legal non-empty modality patterns.")
+        total = sum(weight for _, weight in weighted_groups)
+        if total <= 0:
+            raise ValueError("At least one E2 targeted sampling ratio must be positive.")
+
+        roll = self.random.random()
+        cumulative = 0.0
+        selected_group = weighted_groups[-1][0]
+        for group_name, weight in weighted_groups:
+            cumulative += weight / total
+            if roll <= cumulative:
+                selected_group = group_name
+                break
+        return selected_group, tuple(self.random.choice(groups[selected_group]))
+
     def _choose_combo(self) -> Tuple[str, ...]:
         if self.explicit_combo is not None:
             return self.explicit_combo
@@ -374,9 +429,17 @@ class BraTSClassificationDataset(Dataset):
             return self._sample_curriculum_combo()
         if self.combo_mode == "targeted_no_t1ce":
             return self._sample_targeted_no_t1ce_combo()
+        if self.combo_mode == "targeted_dual_view_train":
+            return self._sample_targeted_missing_combo()[1]
         if self.combo_mode == "random_missing":
             return tuple(self.random.choice(self.all_combos))
         return self.fixed_combo
+
+    def _training_view_spec(self) -> Tuple[Tuple[str, ...], Tuple[str, ...] | None, str | None]:
+        sampled_combo = self._choose_combo()
+        if self.combo_mode != "targeted_dual_view_train":
+            return sampled_combo, None, None
+        return tuple(self.all_modalities), sampled_combo, self._targeted_subgroup_for_combo(sampled_combo)
 
     def _maybe_resize(self, volume: np.ndarray, order: int) -> np.ndarray:
         if self.target_shape is None:
@@ -387,7 +450,7 @@ class BraTSClassificationDataset(Dataset):
 
     def __getitem__(self, index: int):
         record = self.records[index]
-        combo = self._choose_combo()
+        combo, missing_combo, targeted_subgroup = self._training_view_spec()
 
         modality_full: Dict[str, np.ndarray] = {}
         for modality in self.all_modalities:
@@ -451,7 +514,7 @@ class BraTSClassificationDataset(Dataset):
         images = np.stack([image_dict[m] if m in combo else np.zeros(image_shape, dtype=np.float32) for m in self.all_modalities], axis=0)
         roi_stack = np.stack([roi_resized[name] for name in ROI_NAMES], axis=0)
 
-        return {
+        sample = {
             "case_id": record.case_id,
             "images": torch.from_numpy(images),
             "label": torch.tensor(record.label, dtype=torch.long),
@@ -461,3 +524,9 @@ class BraTSClassificationDataset(Dataset):
             "available_modalities": torch.from_numpy(available_mask),
             "combo": combo,
         }
+        if missing_combo is not None:
+            missing_mask = np.asarray([1.0 if modality in missing_combo else 0.0 for modality in self.all_modalities], dtype=np.float32)
+            sample["missing_available_modalities"] = torch.from_numpy(missing_mask)
+            sample["missing_combo"] = missing_combo
+            sample["targeted_subgroup"] = targeted_subgroup
+        return sample

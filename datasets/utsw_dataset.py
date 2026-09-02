@@ -171,7 +171,7 @@ class UTSWClassificationDataset(BraTSClassificationDataset):
 
     def __getitem__(self, index: int):
         record = self.records[index]
-        combo = self._choose_combo()
+        combo, missing_combo, targeted_subgroup = self._training_view_spec()
 
         seg_image, seg = _load_image(record.files["seg"])
         spacing = tuple(float(value) for value in seg_image.header.get_zooms()[:3])
@@ -202,7 +202,7 @@ class UTSWClassificationDataset(BraTSClassificationDataset):
             axis=0,
         )
         roi_stack = np.stack([acp_masks[name].astype(np.float32) for name in ROI_NAMES], axis=0)
-        return {
+        sample = {
             "case_id": record.case_id,
             "patient_id": record.patient_id,
             "images": torch.from_numpy(images),
@@ -213,3 +213,9 @@ class UTSWClassificationDataset(BraTSClassificationDataset):
             "available_modalities": torch.from_numpy(available_mask),
             "combo": combo,
         }
+        if missing_combo is not None:
+            missing_mask = np.asarray([1.0 if modality in missing_combo else 0.0 for modality in self.all_modalities], dtype=np.float32)
+            sample["missing_available_modalities"] = torch.from_numpy(missing_mask)
+            sample["missing_combo"] = missing_combo
+            sample["targeted_subgroup"] = targeted_subgroup
+        return sample
