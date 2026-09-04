@@ -120,6 +120,99 @@ def run_epoch(model, loader, device, criterion=None, optimizer=None, grad_clip: 
     return metrics
 
 
+def compute_modality_auxiliary_loss(output, batch, criterion, modalities: Sequence[str]):
+    """Average weighted CE over modality heads that have observed samples."""
+    auxiliary_logits = output.get("aux_logits")
+    if auxiliary_logits is None:
+        raise RuntimeError("Auxiliary training requires model output['aux_logits'].")
+
+    modality_losses = {}
+    modality_counts = {}
+    observed_losses = []
+    availability = batch["available_modalities"]
+    labels = batch["label"]
+    for mod_idx, modality in enumerate(modalities):
+        observed = availability[:, mod_idx] > 0.5
+        count = int(observed.sum().item())
+        modality_counts[modality] = count
+        if count == 0:
+            modality_losses[modality] = None
+            continue
+        modality_loss = criterion(auxiliary_logits[modality][observed], labels[observed])
+        modality_losses[modality] = modality_loss
+        observed_losses.append(modality_loss)
+
+    if not observed_losses:
+        raise RuntimeError("Auxiliary loss received an empty-modality training batch.")
+    return torch.stack(observed_losses).mean(), modality_losses, modality_counts
+
+
+def run_auxiliary_epoch(
+    model,
+    loader,
+    device,
+    criterion,
+    optimizer,
+    lambda_aux: float = 0.1,
+    grad_clip: float | None = None,
+    threshold: float = 0.5,
+    desc: str = "auxiliary train",
+):
+    """Run E1 single-view training with observed-modality auxiliary classification."""
+    model.train(True)
+    total_main_loss = 0.0
+    total_aux_loss = 0.0
+    total_loss = 0.0
+    y_true, y_prob = [], []
+    stage_stats = []
+    modalities = list(model.modalities)
+    modality_loss_sums = {modality: 0.0 for modality in modalities}
+    modality_counts = {modality: 0 for modality in modalities}
+
+    for batch in tqdm(loader, desc=desc, leave=False):
+        batch = move_batch_to_device(batch, device)
+        optimizer.zero_grad()
+        output = model(batch)
+        main_loss = criterion(output["logits"], batch["label"])
+        auxiliary_loss, per_modality_losses, per_modality_counts = compute_modality_auxiliary_loss(
+            output, batch, criterion, modalities
+        )
+        loss = main_loss + float(lambda_aux) * auxiliary_loss
+        loss.backward()
+        if grad_clip is not None and grad_clip > 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+        optimizer.step()
+
+        batch_size = batch["label"].shape[0]
+        total_main_loss += float(main_loss.item()) * batch_size
+        total_aux_loss += float(auxiliary_loss.item()) * batch_size
+        total_loss += float(loss.item()) * batch_size
+        for modality in modalities:
+            count = per_modality_counts[modality]
+            modality_counts[modality] += count
+            if count:
+                modality_loss_sums[modality] += float(per_modality_losses[modality].item()) * count
+        y_true.extend(batch["label"].detach().cpu().tolist())
+        y_prob.extend(output["prob"].detach().cpu().tolist())
+        if "stage_stats" in output:
+            stage_stats.extend(output["stage_stats"].detach().cpu().tolist())
+
+    num_samples = max(len(loader.dataset), 1)
+    metrics = compute_binary_metrics(y_true, y_prob, threshold=threshold)
+    metrics["loss"] = total_loss / num_samples
+    metrics["main_loss"] = total_main_loss / num_samples
+    metrics["aux_loss"] = total_aux_loss / num_samples
+    metrics["total_loss"] = total_loss / num_samples
+    metrics["lambda_aux"] = float(lambda_aux)
+    for modality in modalities:
+        count = modality_counts[modality]
+        metrics[f"aux_{modality}_loss"] = modality_loss_sums[modality] / count if count else float("nan")
+        metrics[f"aux_{modality}_count"] = count
+    metrics = _append_optional_stats(metrics, stage_stats)
+    metrics = _append_classifier_info(metrics, model)
+    return metrics
+
+
 def run_dual_view_epoch(
     model,
     loader,

@@ -1,0 +1,8 @@
+base_config: "missing_aware_train.yaml"
+
+output_dir: outputs/utsw_idh/missing_aware_aux_e3_seed42
+
+auxiliary:
+  enabled: true
+  lambda_aux: 0.1
+  pooling: mean

@@ -15,7 +15,7 @@ from utils import load_config, set_seed, setup_logger
 from utils.config import ensure_dir
 from utils.io import load_json, save_json
 from utils.metrics import build_drop_t1_ablation_report, calibrate_grouped_3way_t1ce_t1, calibrate_threshold, compute_binary_metrics, summarize_missing_pattern_metrics, threshold_dispatch_for_combo, threshold_for_combo
-from utils.runner import collect_predictions, evaluate_with_explanations, run_dual_view_epoch, run_epoch
+from utils.runner import collect_predictions, evaluate_with_explanations, run_auxiliary_epoch, run_dual_view_epoch, run_epoch
 from utils.training import build_dataloader, build_datasets, build_sampler, class_weights_from_records, dump_split_summary
 from utils.visualization import save_fusion_weight_history
 
@@ -128,6 +128,18 @@ def main():
     missing_val_cfg = config.get("missing_aware_validation", {})
     missing_val_enabled = bool(missing_val_cfg.get("enabled", False))
     dual_view_enabled = bool(config["train"].get("dual_view_enabled", False))
+    auxiliary_cfg = config.get("auxiliary", {})
+    auxiliary_enabled = bool(auxiliary_cfg.get("enabled", False))
+    lambda_aux = float(auxiliary_cfg.get("lambda_aux", 0.1))
+    if auxiliary_enabled:
+        if config["train"].get("mode") != "missing_curriculum_train":
+            raise ValueError("E3 auxiliary supervision requires train.mode=missing_curriculum_train.")
+        if dual_view_enabled:
+            raise ValueError("E3 auxiliary supervision cannot be combined with E2 dual-view training.")
+        if str(auxiliary_cfg.get("pooling", "mean")) != "mean":
+            raise ValueError("E3 auxiliary supervision supports auxiliary.pooling=mean only.")
+        if lambda_aux < 0:
+            raise ValueError("auxiliary.lambda_aux must be non-negative.")
     if dual_view_enabled and config["train"].get("mode") != "targeted_dual_view_train":
         raise ValueError("Dual-view training requires train.mode=targeted_dual_view_train.")
     if config["train"].get("mode") == "targeted_dual_view_train" and not dual_view_enabled:
@@ -207,6 +219,12 @@ def main():
             mismatched = [key for key in dual_view_resume_keys if saved_train_config.get(key) != config["train"].get(key)]
             if mismatched:
                 raise RuntimeError(f"Resume checkpoint does not match the E2 dual-view protocol: {mismatched}")
+        if auxiliary_enabled:
+            saved_auxiliary_config = resume_checkpoint.get("config", {}).get("auxiliary", {})
+            auxiliary_resume_keys = ["enabled", "lambda_aux", "pooling"]
+            mismatched = [key for key in auxiliary_resume_keys if saved_auxiliary_config.get(key) != auxiliary_cfg.get(key)]
+            if mismatched:
+                raise RuntimeError(f"Resume checkpoint does not match the E3 auxiliary protocol: {mismatched}")
         fingerprint_path = config.get("data", {}).get("manifest_fingerprint_json")
         current_fingerprint = load_json(fingerprint_path).get("canonical_manifest_sha256") if fingerprint_path and Path(fingerprint_path).is_file() else None
         saved_fingerprint = resume_checkpoint.get("canonical_manifest_sha256")
@@ -244,6 +262,18 @@ def main():
             sampling_report = dual_result["sampling"]
             save_json(sampling_report, metrics_dir / f"train_sampling_epoch_{epoch:03d}.json")
             logger.info("Epoch %d | targeted sampling=%s", epoch, json.dumps(sampling_report["subgroup_frequencies"], ensure_ascii=False))
+        elif auxiliary_enabled:
+            train_metrics = run_auxiliary_epoch(
+                model,
+                train_loader,
+                device,
+                criterion=criterion,
+                optimizer=optimizer,
+                lambda_aux=lambda_aux,
+                grad_clip=config["train"].get("grad_clip", 0.0),
+                threshold=config["eval"].get("threshold", 0.5),
+                desc=f"auxiliary train {epoch}",
+            )
         else:
             train_metrics = run_epoch(
                 model,
@@ -309,6 +339,13 @@ def main():
         if sampling_report is not None:
             history_item["sampling"] = sampling_report
         history.append(history_item)
+        if auxiliary_enabled:
+            auxiliary_rows = [
+                {"epoch": item["epoch"], **{key: value for key, value in item["train"].items() if key in {"main_loss", "aux_loss", "total_loss", "lambda_aux"} or key.startswith("aux_")}}
+                for item in history
+                if "main_loss" in item["train"]
+            ]
+            pd.DataFrame(auxiliary_rows).to_csv(metrics_dir / "auxiliary_training_history.csv", index=False)
         logger.info("Epoch %d | train=%s | val=%s", epoch, json.dumps(train_metrics, ensure_ascii=False), json.dumps(val_metrics, ensure_ascii=False))
 
         improved = False
@@ -571,6 +608,18 @@ def main():
     pd.DataFrame(test_rows).to_csv(metrics_dir / "test_metrics.csv", index=False)
     if len(all_test_metrics) == len(all_modality_combos):
         missing_pattern_summary = summarize_missing_pattern_metrics(all_test_metrics, config["data"]["modalities"])
+        if auxiliary_enabled:
+            singleton_metrics = {
+                modality: {
+                    "bal_acc": all_test_metrics.get(modality, {}).get("bal_acc", float("nan")),
+                    "auc": all_test_metrics.get(modality, {}).get("auc", float("nan")),
+                }
+                for modality in config["data"]["modalities"]
+            }
+            save_json(singleton_metrics, metrics_dir / "test_singleton_modalities.json")
+            pd.DataFrame([{"modality": modality, **metrics} for modality, metrics in singleton_metrics.items()]).to_csv(
+                metrics_dir / "test_singleton_modalities.csv", index=False
+            )
         save_json(missing_pattern_summary, metrics_dir / "test_missing_pattern_summary.json")
         pd.DataFrame(missing_pattern_summary["groups"]).to_csv(metrics_dir / "test_missing_pattern_groups.csv", index=False)
         logger.info(

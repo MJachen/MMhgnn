@@ -60,6 +60,11 @@ class HybridHypergraphClassifier(nn.Module):
         self.node_type_embed_dim = int(fusion_cfg.get("node_type_embed_dim", 4))
         self.gating_hidden_dim = int(fusion_cfg.get("gating_hidden_dim", 32))
         self.no_t1ce_t1_penalty = float(fusion_cfg.get("no_t1ce_t1_penalty", 1.0))
+        auxiliary_cfg = config.get("auxiliary", {})
+        self.auxiliary_enabled = bool(auxiliary_cfg.get("enabled", False))
+        self.auxiliary_pooling = str(auxiliary_cfg.get("pooling", "mean"))
+        if self.auxiliary_enabled and self.auxiliary_pooling != "mean":
+            raise ValueError("Modality-wise auxiliary supervision supports pooling=mean only.")
         if self.use_prototype_nodes or self.use_prototype_edges:
             raise ValueError("Anatomy-only mode requires graph.use_prototype_nodes=false and graph.use_prototype_edges=false.")
 
@@ -120,6 +125,14 @@ class HybridHypergraphClassifier(nn.Module):
             nn.ReLU(inplace=True),
         )
         self.mask_bias_head = nn.Linear(self.mask_embed_dim, 2)
+        # Initialize training-only heads after every E1 module so the same seed
+        # preserves the main-path initialization used by the E1 baseline.
+        if self.auxiliary_enabled:
+            self.auxiliary_heads = nn.ModuleDict(
+                {modality: nn.Linear(model_cfg["roi_hidden_dim"], 2) for modality in self.modalities}
+            )
+        else:
+            self.auxiliary_heads = None
 
 
     def get_classifier_info(self) -> Dict[str, object]:
@@ -257,6 +270,21 @@ class HybridHypergraphClassifier(nn.Module):
             legacy_gates.append(gate_row * roi_valid[roi_idx])
         return torch.stack(aggregated, dim=0), torch.stack(legacy_gates, dim=0)
 
+    def _modality_auxiliary_logits(
+        self,
+        modality_features: List[torch.Tensor],
+        roi_valid: torch.Tensor,
+    ) -> Dict[str, torch.Tensor]:
+        if not self.auxiliary_enabled or self.auxiliary_heads is None:
+            return {}
+        denominator = roi_valid.sum().clamp_min(1.0)
+        return {
+            modality: self.auxiliary_heads[modality](
+                (modality_features[mod_idx] * roi_valid.unsqueeze(-1)).sum(dim=0) / denominator
+            )
+            for mod_idx, modality in enumerate(self.modalities)
+        }
+
 
     def _mask_aware_node_fuse(self, modality_features: List[torch.Tensor], available_modalities: torch.Tensor, roi_valid: torch.Tensor):
         ordered_mask = self._mask_in_classifier_order(available_modalities).to(roi_valid.device)
@@ -304,9 +332,14 @@ class HybridHypergraphClassifier(nn.Module):
         mask_bias_list = []
         classifier_mask_list = []
         modality_gate_list = []
+        auxiliary_logits_lists = {modality: [] for modality in self.modalities} if self.auxiliary_enabled else {}
 
         for b_idx in range(batch_size):
             modality_features, shared_init = self._extract_explicit_modality_features(images[b_idx], roi_masks[b_idx], roi_valid[b_idx], available_modalities[b_idx])
+            if self.auxiliary_enabled:
+                subject_auxiliary_logits = self._modality_auxiliary_logits(modality_features, roi_valid[b_idx])
+                for modality, auxiliary_logits in subject_auxiliary_logits.items():
+                    auxiliary_logits_lists[modality].append(auxiliary_logits)
             explicit_nodes, modality_gates = self._stage1_modal_aggregate(modality_features, shared_init, available_modalities[b_idx], roi_valid[b_idx])
 
             if roi_drop_mask is not None:
@@ -337,7 +370,7 @@ class HybridHypergraphClassifier(nn.Module):
                 0.0,
             ], device=explicit_nodes.device))
 
-        return {
+        result = {
             "logits": torch.stack(logits_list, dim=0),
             "prob": torch.stack(prob_list, dim=0),
             "roi_attention": torch.stack(roi_attention_list, dim=0),
@@ -349,3 +382,8 @@ class HybridHypergraphClassifier(nn.Module):
             "branch_enabled": enabled,
             "stage_stats": torch.stack(stage_stats_list, dim=0),
         }
+        if self.auxiliary_enabled:
+            result["aux_logits"] = {
+                modality: torch.stack(logits, dim=0) for modality, logits in auxiliary_logits_lists.items()
+            }
+        return result
