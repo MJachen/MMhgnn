@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import math
 from typing import Dict, List, Optional
 
 import torch
@@ -54,6 +55,12 @@ class HybridHypergraphClassifier(nn.Module):
         self.use_mask_aware_classifier = bool(model_cfg.get("use_mask_aware_classifier", True))
         self.mask_head_type = str(model_cfg.get("mask_head_type", "bias"))
         self.mask_embed_dim = int(model_cfg.get("mask_embed_dim", 8))
+        mask_affine_cfg = config.get("mask_affine", {})
+        self.mask_affine_enabled = bool(mask_affine_cfg.get("enabled", self.mask_head_type == "affine"))
+        self.mask_affine_scale_parameterization = str(mask_affine_cfg.get("scale_parameterization", "softplus"))
+        self.mask_affine_init_scale = float(mask_affine_cfg.get("init_scale", 1.0))
+        self.mask_affine_init_bias = float(mask_affine_cfg.get("init_bias", 0.0))
+        self.mask_affine_eps = float(mask_affine_cfg.get("eps", 1e-6))
         self.use_mask_aware_node_fusion = bool(fusion_cfg.get("use_mask_aware_node_fusion", True))
         self.use_node_type_embed = bool(fusion_cfg.get("use_node_type_embed", True))
         self.fusion_mask_embed_dim = int(fusion_cfg.get("mask_embed_dim", 8))
@@ -116,8 +123,15 @@ class HybridHypergraphClassifier(nn.Module):
             nn.Dropout(model_cfg["dropout"]),
             nn.Linear(model_cfg["classifier_hidden_dim"], 2),
         )
-        if self.use_mask_aware_classifier and self.mask_head_type != "bias":
-            raise ValueError("Experiment 1 implements the minimal mask-aware bias head only: set mask_head_type: bias.")
+        if self.use_mask_aware_classifier and self.mask_head_type not in {"bias", "affine"}:
+            raise ValueError("Mask-aware classifier supports mask_head_type: bias or affine.")
+        if self.mask_head_type == "affine":
+            if not self.mask_affine_enabled:
+                raise ValueError("mask_head_type=affine requires mask_affine.enabled=true.")
+            if self.mask_affine_scale_parameterization != "softplus":
+                raise ValueError("E4A supports mask_affine.scale_parameterization=softplus only.")
+            if self.mask_affine_init_scale <= self.mask_affine_eps:
+                raise ValueError("mask_affine.init_scale must be greater than mask_affine.eps.")
         self.mask_encoder = nn.Sequential(
             nn.Linear(4, self.mask_embed_dim),
             nn.ReLU(inplace=True),
@@ -133,10 +147,20 @@ class HybridHypergraphClassifier(nn.Module):
             )
         else:
             self.auxiliary_heads = None
+        if self.use_mask_aware_classifier and self.mask_head_type == "affine":
+            self.mask_affine_head = nn.Linear(self.mask_embed_dim, 2)
+            nn.init.zeros_(self.mask_affine_head.weight)
+            initial_raw_scale = math.log(math.expm1(self.mask_affine_init_scale - self.mask_affine_eps))
+            with torch.no_grad():
+                self.mask_affine_head.bias.copy_(
+                    torch.tensor([initial_raw_scale, self.mask_affine_init_bias], dtype=self.mask_affine_head.bias.dtype)
+                )
+        else:
+            self.mask_affine_head = None
 
 
     def get_classifier_info(self) -> Dict[str, object]:
-        return {
+        info = {
             "use_mask_aware_classifier": bool(self.use_mask_aware_classifier),
             "mask_head_type": self.mask_head_type if self.use_mask_aware_classifier else "none",
             "mask_order": list(self.mask_order),
@@ -144,6 +168,17 @@ class HybridHypergraphClassifier(nn.Module):
             "use_node_type_embed": bool(self.use_node_type_embed),
             "no_t1ce_t1_penalty": float(self.no_t1ce_t1_penalty),
         }
+        if self.use_mask_aware_classifier and self.mask_head_type == "affine":
+            info.update(
+                {
+                    "mask_affine_enabled": bool(self.mask_affine_enabled),
+                    "mask_affine_scale_parameterization": self.mask_affine_scale_parameterization,
+                    "mask_affine_init_scale": float(self.mask_affine_init_scale),
+                    "mask_affine_init_bias": float(self.mask_affine_init_bias),
+                    "mask_affine_eps": float(self.mask_affine_eps),
+                }
+            )
+        return info
 
     def _mask_in_classifier_order(self, available_modalities: torch.Tensor) -> torch.Tensor:
         ordered = torch.zeros(len(self.mask_order), device=available_modalities.device, dtype=available_modalities.dtype)
@@ -171,6 +206,29 @@ class HybridHypergraphClassifier(nn.Module):
         mask_embed = self.mask_encoder(mask.unsqueeze(0)).squeeze(0)
         mask_bias = self.mask_bias_head(mask_embed)
         return base_logits + mask_bias, mask_bias, mask
+
+    def _mask_affine_values(self, available_modalities: torch.Tensor):
+        if self.mask_affine_head is None:
+            raise RuntimeError("Mask-affine values requested while mask_head_type is not affine.")
+        mask = self._mask_in_classifier_order(available_modalities)
+        mask_embed = self.mask_encoder(mask.unsqueeze(0)).squeeze(0)
+        raw_scale, affine_bias = self.mask_affine_head(mask_embed).unbind(dim=0)
+        affine_scale = F.softplus(raw_scale) + self.mask_affine_eps
+        return mask, affine_scale, affine_bias
+
+    def _apply_mask_aware_classifier(self, base_logits: torch.Tensor, available_modalities: torch.Tensor):
+        if not self.use_mask_aware_classifier or self.mask_head_type == "bias":
+            logits, correction, mask = self._apply_mask_aware_bias(base_logits, available_modalities)
+            return logits, correction, mask, None, None
+
+        mask, affine_scale, affine_bias = self._mask_affine_values(available_modalities)
+        binary_logit = base_logits[1] - base_logits[0]
+        aligned_binary_logit = affine_scale * binary_logit + affine_bias
+        logit_center = base_logits.mean()
+        logits = torch.stack(
+            [logit_center - 0.5 * aligned_binary_logit, logit_center + 0.5 * aligned_binary_logit], dim=0
+        )
+        return logits, logits - base_logits, mask, affine_scale, affine_bias
 
     def get_enabled_branches(self, branch_override: Optional[Dict[str, bool]] = None) -> Dict[str, bool]:
         enabled = {"modal": self.use_modal_edges, "prior": self.use_prior_edges, "knn": False}
@@ -332,6 +390,8 @@ class HybridHypergraphClassifier(nn.Module):
         mask_bias_list = []
         classifier_mask_list = []
         modality_gate_list = []
+        affine_scale_list = []
+        affine_bias_list = []
         auxiliary_logits_lists = {modality: [] for modality in self.modalities} if self.auxiliary_enabled else {}
 
         for b_idx in range(batch_size):
@@ -354,7 +414,9 @@ class HybridHypergraphClassifier(nn.Module):
             node_attn = torch.softmax(attn_logits, dim=0)
             graph_repr = torch.sum(updated_nodes * node_attn.unsqueeze(-1), dim=0)
             base_logits = self.classifier(graph_repr)
-            logits, mask_bias, classifier_mask = self._apply_mask_aware_bias(base_logits, available_modalities[b_idx])
+            logits, mask_bias, classifier_mask, affine_scale, affine_bias = self._apply_mask_aware_classifier(
+                base_logits, available_modalities[b_idx]
+            )
             prob = torch.softmax(logits, dim=-1)[1]
 
             logits_list.append(logits)
@@ -364,6 +426,9 @@ class HybridHypergraphClassifier(nn.Module):
             mask_bias_list.append(mask_bias)
             classifier_mask_list.append(classifier_mask)
             modality_gate_list.append(modality_gates)
+            if affine_scale is not None:
+                affine_scale_list.append(affine_scale)
+                affine_bias_list.append(affine_bias)
             stage_stats_list.append(torch.tensor([
                 float(incidence.shape[1]),
                 float(enabled["prior"]),
@@ -386,4 +451,7 @@ class HybridHypergraphClassifier(nn.Module):
             result["aux_logits"] = {
                 modality: torch.stack(logits, dim=0) for modality, logits in auxiliary_logits_lists.items()
             }
+        if affine_scale_list:
+            result["affine_scale"] = torch.stack(affine_scale_list, dim=0)
+            result["affine_bias"] = torch.stack(affine_bias_list, dim=0)
         return result

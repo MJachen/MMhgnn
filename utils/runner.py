@@ -71,6 +71,8 @@ def _append_classifier_info(metrics: Dict, model) -> Dict:
         metrics["use_mask_aware_node_fusion"] = bool(info.get("use_mask_aware_node_fusion", False))
         metrics["use_node_type_embed"] = bool(info.get("use_node_type_embed", False))
         metrics["no_t1ce_t1_penalty"] = float(info.get("no_t1ce_t1_penalty", 0.0))
+        if info.get("mask_head_type") == "affine":
+            metrics["mask_affine_scale_parameterization"] = str(info.get("mask_affine_scale_parameterization", ""))
     return metrics
 
 
@@ -305,6 +307,7 @@ def collect_predictions(model, loader, device, branch_override=None, explain_num
     y_true, y_prob = [], []
     roi_scores_all, stage_stats_all = [], []
     modality_gates_all = []
+    affine_scales_all, affine_biases_all = [], []
     combos_all = []
     case_payloads = []
     exported = 0
@@ -321,6 +324,9 @@ def collect_predictions(model, loader, device, branch_override=None, explain_num
             stage_stats_all.extend(output["stage_stats"].detach().cpu().tolist())
         if "modality_gates" in output:
             modality_gates_all.extend(output["modality_gates"].detach().cpu().tolist())
+        if "affine_scale" in output:
+            affine_scales_all.extend(output["affine_scale"].detach().cpu().tolist())
+            affine_biases_all.extend(output["affine_bias"].detach().cpu().tolist())
         combos_all.extend([tuple(c) for c in batch.get("combo", [])])
         if exported < explain_num_cases:
             batch_size = len(batch["case_id"])
@@ -341,6 +347,8 @@ def collect_predictions(model, loader, device, branch_override=None, explain_num
         "roi_scores": np.asarray(roi_scores_all, dtype=float),
         "stage_stats": np.asarray(stage_stats_all, dtype=float) if stage_stats_all else np.zeros((0, 3), dtype=float),
         "modality_gates": np.asarray(modality_gates_all, dtype=float) if modality_gates_all else np.zeros((0, 0, 0), dtype=float),
+        "affine_scales": np.asarray(affine_scales_all, dtype=float),
+        "affine_biases": np.asarray(affine_biases_all, dtype=float),
         "combos": combos_all,
         "case_payloads": case_payloads,
     }
@@ -370,6 +378,8 @@ def evaluate_with_explanations(
     roi_scores = collected["roi_scores"]
     stage_stats = collected["stage_stats"]
     modality_gates = collected["modality_gates"]
+    affine_scales = collected["affine_scales"]
+    affine_biases = collected["affine_biases"]
 
     metrics = compute_binary_metrics(y_true, y_prob, threshold=threshold)
     y_pred = (y_prob >= threshold).astype(int)
@@ -383,6 +393,13 @@ def evaluate_with_explanations(
     metrics["applied_threshold"] = float(threshold)
     mask_order = model.get_classifier_info().get("mask_order", []) if hasattr(model, "get_classifier_info") else []
     metrics = _append_gate_stats(metrics, modality_gates, roi_names, mask_order)
+    if affine_scales.size > 0:
+        metrics["mean_affine_scale"] = float(affine_scales.mean())
+        metrics["min_affine_scale"] = float(affine_scales.min())
+        metrics["max_affine_scale"] = float(affine_scales.max())
+        metrics["mean_affine_bias"] = float(affine_biases.mean())
+        metrics["min_affine_bias"] = float(affine_biases.min())
+        metrics["max_affine_bias"] = float(affine_biases.max())
     save_metrics_files(metrics, output_dir)
 
     if modality_gates.size > 0 and hasattr(model, "get_classifier_info"):

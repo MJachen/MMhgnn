@@ -40,7 +40,11 @@ def collect_validation_predictions_for_combos(model, config, device, combos, thr
         val_loader_combo = build_dataloader(val_ds_combo, config["train"]["batch_size"], config["data"].get("num_workers", 0), shuffle=False)
         collected = collect_predictions(model, val_loader_combo, device)
         combo_name = "_".join(combo)
-        metrics_by_combo[combo_name] = compute_binary_metrics(collected["y_true"], collected["y_prob"], threshold=threshold)
+        combo_metrics = compute_binary_metrics(collected["y_true"], collected["y_prob"], threshold=threshold)
+        if collected["affine_scales"].size > 0:
+            combo_metrics["mean_affine_scale"] = float(collected["affine_scales"].mean())
+            combo_metrics["mean_affine_bias"] = float(collected["affine_biases"].mean())
+        metrics_by_combo[combo_name] = combo_metrics
         y_true.extend(collected["y_true"].tolist())
         y_prob.extend(collected["y_prob"].tolist())
         combo_tags.extend(collected.get("combos", [tuple(combo)] * len(collected["y_true"])))
@@ -73,6 +77,36 @@ def split_provenance(splits):
         ]
         for name, records in splits.items()
     }
+
+
+@torch.no_grad()
+def mask_affine_parameter_rows(model, modalities, combos):
+    if not hasattr(model, "_mask_affine_values"):
+        return []
+    device = next(model.parameters()).device
+    rows = []
+    for combo in combos:
+        availability = torch.tensor(
+            [float(modality in combo) for modality in modalities], device=device, dtype=torch.float32
+        )
+        mask, scale, bias = model._mask_affine_values(availability)
+        scale_value = float(scale.item())
+        bias_value = float(bias.item())
+        rows.append(
+            {
+                "combo": "_".join(combo),
+                "mask_order": ",".join(model.mask_order),
+                "mask": "".join(str(int(value)) for value in mask.detach().cpu().tolist()),
+                "scale": scale_value,
+                "bias": bias_value,
+                "scale_positive": scale_value > 0.0,
+                "scale_extreme": scale_value < 1e-3 or scale_value > 10.0,
+                "bias_finite": bool(torch.isfinite(bias).item()),
+                "subject_independent_mask_function": True,
+                "applies_to": "validation_and_test",
+            }
+        )
+    return rows
 
 
 def checkpoint_payload(model, optimizer, config, epoch, score, best_score, bad_epochs, history, splits, threshold_metadata=None, selection_metrics=None):
@@ -131,6 +165,20 @@ def main():
     auxiliary_cfg = config.get("auxiliary", {})
     auxiliary_enabled = bool(auxiliary_cfg.get("enabled", False))
     lambda_aux = float(auxiliary_cfg.get("lambda_aux", 0.1))
+    mask_head_type = str(config.get("model", {}).get("mask_head_type", "bias"))
+    mask_affine_cfg = config.get("mask_affine", {})
+    affine_enabled = bool(config.get("model", {}).get("use_mask_aware_classifier", True) and mask_head_type == "affine")
+    if affine_enabled:
+        if not bool(mask_affine_cfg.get("enabled", False)):
+            raise ValueError("E4A requires mask_affine.enabled=true.")
+        if str(mask_affine_cfg.get("scale_parameterization", "softplus")) != "softplus":
+            raise ValueError("E4A requires mask_affine.scale_parameterization=softplus.")
+        if abs(float(mask_affine_cfg.get("init_scale", 1.0)) - 1.0) > 1e-12:
+            raise ValueError("E4A requires mask_affine.init_scale=1.0.")
+        if abs(float(mask_affine_cfg.get("init_bias", 0.0))) > 1e-12:
+            raise ValueError("E4A requires mask_affine.init_bias=0.0.")
+        if not auxiliary_enabled or abs(lambda_aux - 0.1) > 1e-12 or str(auxiliary_cfg.get("pooling", "mean")) != "mean":
+            raise ValueError("E4A must retain E3 auxiliary supervision with lambda_aux=0.1 and mean pooling.")
     if auxiliary_enabled:
         if config["train"].get("mode") != "missing_curriculum_train":
             raise ValueError("E3 auxiliary supervision requires train.mode=missing_curriculum_train.")
@@ -201,6 +249,10 @@ def main():
     resume_path = config["train"].get("resume")
     if resume_path:
         resume_checkpoint = torch.load(resume_path, map_location=device)
+        if affine_enabled:
+            saved_config = resume_checkpoint.get("config", {})
+            if saved_config.get("model", {}).get("mask_head_type") != "affine" or saved_config.get("mask_affine", {}) != mask_affine_cfg:
+                raise RuntimeError("Resume checkpoint does not match the E4A mask-affine protocol.")
         model.load_state_dict(resume_checkpoint["model"])
         optimizer.load_state_dict(resume_checkpoint["optimizer"])
         if int(resume_checkpoint.get("seed", config["seed"])) != int(config["seed"]):
@@ -484,6 +536,11 @@ def main():
     checkpoint_path = ckpt_dir / "best.pt"
     checkpoint = torch.load(checkpoint_path, map_location=device)
     model.load_state_dict(checkpoint["model"])
+    if affine_enabled:
+        affine_rows = mask_affine_parameter_rows(model, config["data"]["modalities"], all_modality_combos)
+        pd.DataFrame(affine_rows).to_csv(metrics_dir / "mask_affine_parameters.csv", index=False)
+        if any(row["scale_extreme"] or not row["scale_positive"] or not row["bias_finite"] for row in affine_rows):
+            logger.warning("Extreme or non-finite mask-affine parameter detected; inspect metrics/mask_affine_parameters.csv")
 
     calibration_cfg = config.get("calibration", {})
     calibrated_threshold = float(config["eval"].get("threshold", calibration_cfg.get("default_threshold", 0.5)))

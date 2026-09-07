@@ -1,0 +1,14 @@
+base_config: "missing_aware_aux_e3.yaml"
+
+output_dir: outputs/utsw_idh/missing_aware_aux_affine_e4a_seed42
+
+model:
+  use_mask_aware_classifier: true
+  mask_head_type: affine
+
+mask_affine:
+  enabled: true
+  scale_parameterization: softplus
+  init_scale: 1.0
+  init_bias: 0.0
+  eps: 0.000001
