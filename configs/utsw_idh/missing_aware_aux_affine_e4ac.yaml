@@ -1,0 +1,10 @@
+base_config: "missing_aware_aux_affine_e4a.yaml"
+
+output_dir: outputs/utsw_idh/missing_aware_aux_affine_e4ac_seed42
+
+train:
+  curriculum_stage1_ratio: 0.10
+  curriculum_stage2_ratio: 0.20
+  curriculum_stage3_ratio: 0.70
+  minimum_stage3_epochs: 20
+  record_curriculum_sampling: true

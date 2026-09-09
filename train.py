@@ -13,6 +13,7 @@ from datasets.brats_dataset import get_all_modality_combinations
 from models import HybridHypergraphClassifier
 from utils import load_config, set_seed, setup_logger
 from utils.config import ensure_dir
+from utils.curriculum import curriculum_sampling_ratios, reset_bad_epochs_on_stage3_entry, should_early_stop, stage3_status
 from utils.io import load_json, save_json
 from utils.metrics import build_drop_t1_ablation_report, calibrate_grouped_3way_t1ce_t1, calibrate_threshold, compute_binary_metrics, summarize_missing_pattern_metrics, threshold_dispatch_for_combo, threshold_for_combo
 from utils.runner import collect_predictions, evaluate_with_explanations, run_auxiliary_epoch, run_dual_view_epoch, run_epoch
@@ -109,7 +110,7 @@ def mask_affine_parameter_rows(model, modalities, combos):
     return rows
 
 
-def checkpoint_payload(model, optimizer, config, epoch, score, best_score, bad_epochs, history, splits, threshold_metadata=None, selection_metrics=None):
+def checkpoint_payload(model, optimizer, config, epoch, score, best_score, bad_epochs, history, splits, threshold_metadata=None, selection_metrics=None, curriculum_state=None):
     fingerprint_path = config.get("data", {}).get("manifest_fingerprint_json")
     manifest_fingerprint = None
     if fingerprint_path and Path(fingerprint_path).is_file():
@@ -128,6 +129,7 @@ def checkpoint_payload(model, optimizer, config, epoch, score, best_score, bad_e
         "split": split_provenance(splits),
         "selection_metric": config["train"].get("save_metric", "auc"),
         "selection_metrics": selection_metrics or {},
+        "curriculum_state": curriculum_state or {},
         "threshold_calibration": threshold_metadata
         or {
             "enabled": False,
@@ -277,6 +279,24 @@ def main():
             mismatched = [key for key in auxiliary_resume_keys if saved_auxiliary_config.get(key) != auxiliary_cfg.get(key)]
             if mismatched:
                 raise RuntimeError(f"Resume checkpoint does not match the E3 auxiliary protocol: {mismatched}")
+        if int(config["train"].get("minimum_stage3_epochs", 0)) > 0:
+            saved_train_config = resume_checkpoint.get("config", {}).get("train", {})
+            curriculum_resume_keys = [
+                "mode",
+                "curriculum_stage1_ratio",
+                "curriculum_stage2_ratio",
+                "curriculum_stage3_ratio",
+                "stage2_full_ratio",
+                "stage2_single_missing_ratio",
+                "stage3_full_ratio",
+                "stage3_single_missing_ratio",
+                "stage3_double_missing_ratio",
+                "stage3_triple_missing_ratio",
+                "minimum_stage3_epochs",
+            ]
+            mismatched = [key for key in curriculum_resume_keys if saved_train_config.get(key) != config["train"].get(key)]
+            if mismatched:
+                raise RuntimeError(f"Resume checkpoint does not match the E4A-C curriculum protocol: {mismatched}")
         fingerprint_path = config.get("data", {}).get("manifest_fingerprint_json")
         current_fingerprint = load_json(fingerprint_path).get("canonical_manifest_sha256") if fingerprint_path and Path(fingerprint_path).is_file() else None
         saved_fingerprint = resume_checkpoint.get("canonical_manifest_sha256")
@@ -294,7 +314,30 @@ def main():
         logger.info("Resumed training from %s at epoch %d", resume_path, start_epoch)
 
     total_epochs = int(config["train"]["epochs"])
+    minimum_stage3_epochs = int(config["train"].get("minimum_stage3_epochs", 0))
+    curriculum_stabilization_enabled = (
+        config["train"].get("mode") == "missing_curriculum_train" and minimum_stage3_epochs > 0
+    )
+    previous_stage = None
+    if curriculum_stabilization_enabled and start_epoch > 1:
+        previous_stage = stage3_status(start_epoch - 1, total_epochs, config["train"], minimum_stage3_epochs)["stage"]
     for epoch in range(start_epoch, total_epochs + 1):
+        if curriculum_stabilization_enabled:
+            curriculum_state = stage3_status(epoch, total_epochs, config["train"], minimum_stage3_epochs)
+            bad_epochs, entered_stage3_now = reset_bad_epochs_on_stage3_entry(
+                curriculum_state["stage"], previous_stage, bad_epochs
+            )
+        else:
+            curriculum_state = {
+                "stage": "not_applicable",
+                "stage3_entered_epoch": None,
+                "stage3_epochs_completed": 0,
+                "early_stopping_protected": False,
+            }
+            entered_stage3_now = False
+        if entered_stage3_now:
+            logger.info("Epoch %d | entered Stage3; reset bad_epochs=0", epoch)
+        previous_stage = curriculum_state["stage"]
         if hasattr(train_ds, "set_epoch"):
             train_ds.set_epoch(epoch, int(config["train"]["epochs"]), config["train"])
         sampling_report = None
@@ -337,6 +380,12 @@ def main():
                 threshold=config["eval"].get("threshold", 0.5),
                 desc=f"train {epoch}",
             )
+        if (
+            config["train"].get("mode") == "missing_curriculum_train"
+            and bool(config["train"].get("record_curriculum_sampling", False))
+        ):
+            sampling_report = train_ds.curriculum_sampling_report()
+            save_json(sampling_report, metrics_dir / f"train_sampling_epoch_{epoch:03d}.json")
         val_metrics = run_epoch(
             model,
             val_loader,
@@ -387,7 +436,31 @@ def main():
             if score != score:
                 score = val_metrics.get("bal_acc", 0.0)
 
-        history_item = {"epoch": epoch, "train": train_metrics, "val": val_metrics}
+        improved = False
+        if selection_event:
+            improved = score > best_score
+            if improved:
+                best_score = score
+                bad_epochs = 0
+            else:
+                bad_epochs += validation_interval if missing_val_enabled else 1
+        curriculum_state.update(
+            {
+                "sampling_ratios": curriculum_sampling_ratios(curriculum_state["stage"], config["train"])
+                if curriculum_stabilization_enabled else {},
+                "bad_epochs": bad_epochs,
+            }
+        )
+        train_metrics.update(
+            {
+                "curriculum_stage": curriculum_state["stage"],
+                "stage3_entered_epoch": curriculum_state["stage3_entered_epoch"],
+                "stage3_epochs_completed": curriculum_state["stage3_epochs_completed"],
+                "early_stopping_protected": curriculum_state["early_stopping_protected"],
+                "bad_epochs": bad_epochs,
+            }
+        )
+        history_item = {"epoch": epoch, "train": train_metrics, "val": val_metrics, "curriculum": curriculum_state}
         if sampling_report is not None:
             history_item["sampling"] = sampling_report
         history.append(history_item)
@@ -398,16 +471,19 @@ def main():
                 if "main_loss" in item["train"]
             ]
             pd.DataFrame(auxiliary_rows).to_csv(metrics_dir / "auxiliary_training_history.csv", index=False)
+        logger.info(
+            "Epoch %d | curriculum=%s | sampling_ratios=%s | stage3_entered_epoch=%d | stage3_completed=%d | protection=%s | bad_epochs=%d",
+            epoch,
+            curriculum_state["stage"],
+            json.dumps(curriculum_state["sampling_ratios"], ensure_ascii=False),
+            curriculum_state["stage3_entered_epoch"] or 0,
+            curriculum_state["stage3_epochs_completed"],
+            curriculum_state["early_stopping_protected"],
+            bad_epochs,
+        )
+        if sampling_report is not None:
+            logger.info("Epoch %d | actual curriculum sampling=%s", epoch, json.dumps(sampling_report["subgroup_frequencies"], ensure_ascii=False))
         logger.info("Epoch %d | train=%s | val=%s", epoch, json.dumps(train_metrics, ensure_ascii=False), json.dumps(val_metrics, ensure_ascii=False))
-
-        improved = False
-        if selection_event:
-            improved = score > best_score
-            if improved:
-                best_score = score
-                bad_epochs = 0
-            else:
-                bad_epochs += validation_interval if missing_val_enabled else 1
         payload = checkpoint_payload(
             model,
             optimizer,
@@ -419,12 +495,18 @@ def main():
             history,
             splits,
             selection_metrics=latest_selection_metrics,
+            curriculum_state=curriculum_state,
         )
         torch.save(payload, ckpt_dir / "last.pt")
         if improved:
             torch.save(payload, ckpt_dir / "best.pt")
             logger.info("Saved new best checkpoint with %s=%.4f", metric_name, score)
-        if selection_event and bad_epochs >= int(config["train"].get("early_stop_patience", 8)):
+        if should_early_stop(
+            selection_event,
+            bad_epochs,
+            int(config["train"].get("early_stop_patience", 8)),
+            curriculum_state["early_stopping_protected"],
+        ):
             logger.info("Early stopping triggered at epoch %d", epoch)
             break
 

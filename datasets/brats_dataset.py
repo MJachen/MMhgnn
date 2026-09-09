@@ -15,6 +15,7 @@ from sklearn.model_selection import train_test_split
 from torch.utils.data import Dataset
 
 from utils.io import load_json, save_json
+from utils.curriculum import curriculum_sampling_ratios, curriculum_stage
 
 
 ALL_MODALITIES = ["t2", "t1ce", "t1", "flair"]
@@ -287,6 +288,7 @@ class BraTSClassificationDataset(Dataset):
         self.peri_outer_radius = peri_outer_radius
         self.allow_full_resolution_input = allow_full_resolution_input
         self.tumor_mask_source = tumor_mask_source
+        self._sampled_pattern_counts: Dict[str, int] = {}
 
     def __len__(self) -> int:
         return len(self.records)
@@ -300,22 +302,21 @@ class BraTSClassificationDataset(Dataset):
             self.curriculum_config = dict(curriculum_config)
         # Make curriculum sampling reproducible while still changing by epoch.
         self.random.seed(self.random_seed + self.current_epoch * 9973)
+        self._sampled_pattern_counts = {}
 
     def _combos_by_visible_count(self, visible_count: int) -> List[Tuple[str, ...]]:
         return [tuple(c) for c in itertools.combinations(self.all_modalities, visible_count)]
 
     def _sample_curriculum_combo(self) -> Tuple[str, ...]:
         cfg = self.curriculum_config
-        progress = (self.current_epoch - 1) / max(self.total_epochs, 1)
-        stage1_end = float(cfg.get("curriculum_stage1_ratio", 0.3))
-        stage2_end = stage1_end + float(cfg.get("curriculum_stage2_ratio", 0.4))
+        stage = curriculum_stage(self.current_epoch, self.total_epochs, cfg)
         full_combo = tuple(self.all_modalities)
 
-        if progress < stage1_end:
+        if stage == "stage1":
             return full_combo
 
         roll = self.random.random()
-        if progress < stage2_end:
+        if stage == "stage2":
             full_ratio = float(cfg.get("stage2_full_ratio", 0.7))
             if roll < full_ratio:
                 return full_combo
@@ -340,6 +341,27 @@ class BraTSClassificationDataset(Dataset):
                     return tuple(self.random.choice(self._combos_by_visible_count(2)))
                 return tuple(self.random.choice(self._combos_by_visible_count(1)))
         return full_combo
+
+    def curriculum_sampling_report(self) -> Dict:
+        stage = curriculum_stage(self.current_epoch, self.total_epochs, self.curriculum_config)
+        configured = curriculum_sampling_ratios(stage, self.curriculum_config)
+        subgroup_counts = {name: 0 for name in configured}
+        for pattern, count in self._sampled_pattern_counts.items():
+            visible = len(pattern.split("_"))
+            subgroup = {4: "full", 3: "single_missing", 2: "double_missing", 1: "triple_missing"}[visible]
+            subgroup_counts[subgroup] += count
+        total = sum(subgroup_counts.values())
+        return {
+            "stage": stage,
+            "configured_ratios": configured,
+            "subgroup_counts": subgroup_counts,
+            "subgroup_frequencies": {name: (count / total if total else 0.0) for name, count in subgroup_counts.items()},
+            "pattern_counts": dict(sorted(self._sampled_pattern_counts.items())),
+            "pattern_frequencies": {
+                name: (count / total if total else 0.0) for name, count in sorted(self._sampled_pattern_counts.items())
+            },
+            "num_samples": total,
+        }
 
 
     def _sample_targeted_no_t1ce_combo(self) -> Tuple[str, ...]:
@@ -451,6 +473,9 @@ class BraTSClassificationDataset(Dataset):
     def __getitem__(self, index: int):
         record = self.records[index]
         combo, missing_combo, targeted_subgroup = self._training_view_spec()
+        if self.combo_mode == "missing_curriculum_train":
+            pattern_name = "_".join(combo)
+            self._sampled_pattern_counts[pattern_name] = self._sampled_pattern_counts.get(pattern_name, 0) + 1
 
         modality_full: Dict[str, np.ndarray] = {}
         for modality in self.all_modalities:
