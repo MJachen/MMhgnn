@@ -1,0 +1,57 @@
+base_config: "server_base.yaml"
+
+output_dir: outputs/utsw_idh/frozen_affine_e4b_seed42
+
+train:
+  mode: fixed_combo
+  fixed_combo: [t2, t1ce, t1, flair]
+  batch_size: 1
+  save_metric: mean15_bal_acc
+  enable_targeted_finetune: false
+
+auxiliary:
+  enabled: true
+  lambda_aux: 0.1
+  pooling: mean
+  loss_enabled: false
+
+model:
+  use_mask_aware_classifier: true
+  mask_head_type: affine
+
+mask_affine:
+  enabled: true
+  scale_parameterization: softplus
+  init_scale: 1.0
+  init_bias: 0.0
+  eps: 0.000001
+
+missing_aware_validation:
+  enabled: true
+  selection_threshold: 0.5
+
+calibration:
+  enable_threshold_calibration: true
+  threshold_mode: global
+  threshold_metric: balanced_accuracy
+  default_threshold: 0.5
+  pool_validation_all_combos: true
+
+eval:
+  test_all_combos: true
+
+e4b:
+  enabled: true
+  source_checkpoint: outputs/utsw_idh/missing_aware_aux_affine_e4a_seed42/checkpoints/best.pt
+  freeze_backbone: true
+  train_affine_only: true
+  use_all_15_train_patterns: true
+  equal_pattern_weight: true
+  use_cached_pre_affine_logits: true
+  lr: 0.0005
+  weight_decay: 0.0001
+  epochs: 100
+  cache_batch_size: 256
+  early_stop_patience: 15
+  selection_metric: mean15_bal_acc
+  auc_invariance_tolerance: 0.0001
