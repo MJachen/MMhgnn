@@ -119,6 +119,16 @@ def classifier_mask(modalities: Sequence[str], mask_order: Sequence[str], combo:
     return [float(modality in combo_set) for modality in mask_order]
 
 
+def smoke_records(records):
+    selected = []
+    for label in [0, 1]:
+        match = next((record for record in records if int(record.label) == label), None)
+        if match is None:
+            raise RuntimeError("E4B real-data smoke requires one subject from each class.")
+        selected.append(match)
+    return selected
+
+
 @torch.no_grad()
 def extract_base_logit_cache(model, config, device, split_name: str, combos, smoke: bool = False) -> pd.DataFrame:
     if split_name not in {"train", "val", "test"}:
@@ -142,7 +152,7 @@ def extract_base_logit_cache(model, config, device, split_name: str, combos, smo
             else:
                 dataset = test_ds
             if smoke:
-                dataset.records = dataset.records[:2]
+                dataset.records = smoke_records(dataset.records)
             loader = build_dataloader(dataset, 1, config["data"].get("num_workers", 0), shuffle=False)
             for batch in tqdm(loader, desc=f"cache {split_name} {'_'.join(combo)}", leave=False):
                 captured.clear()

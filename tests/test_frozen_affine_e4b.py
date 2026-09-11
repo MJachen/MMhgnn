@@ -18,6 +18,7 @@ from tools.train_frozen_affine_e4b import (
     configure_affine_only,
     evaluate_cache,
     state_hash,
+    smoke_records,
     validate_cache_frame,
 )
 from utils import load_config
@@ -98,6 +99,15 @@ class FrozenAffineE4BTests(unittest.TestCase):
         validate_cache_frame(frame, "train", ["train_a", "train_b"], combos)
         with self.assertRaises(RuntimeError):
             validate_cache_frame(frame, "val", ["train_a", "train_b"], combos)
+
+    def test_smoke_selection_contains_both_classes(self):
+        class Record:
+            def __init__(self, case_id, label):
+                self.case_id = case_id
+                self.label = label
+
+        selected = smoke_records([Record("zero_a", 0), Record("zero_b", 0), Record("one", 1)])
+        self.assertEqual([record.label for record in selected], [0, 1])
 
 
 if __name__ == "__main__":
