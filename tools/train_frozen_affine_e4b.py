@@ -424,8 +424,10 @@ def main():
     # Phase A deliberately creates train and validation caches only. Test images are not indexed here.
     train_cache = extract_base_logit_cache(model, config, device, "train", combos, smoke=args.smoke)
     val_cache = extract_base_logit_cache(model, config, device, "val", combos, smoke=args.smoke)
-    train_case_ids = [record.case_id for record in splits["train"][:2]] if args.smoke else [record.case_id for record in splits["train"]]
-    val_case_ids = [record.case_id for record in splits["val"][:2]] if args.smoke else [record.case_id for record in splits["val"]]
+    train_records = smoke_records(splits["train"]) if args.smoke else splits["train"]
+    val_records = smoke_records(splits["val"]) if args.smoke else splits["val"]
+    train_case_ids = [record.case_id for record in train_records]
+    val_case_ids = [record.case_id for record in val_records]
     validate_cache_frame(train_cache, "train", train_case_ids, combos)
     validate_cache_frame(val_cache, "val", val_case_ids, combos)
     cache_metadata = {
@@ -530,7 +532,8 @@ def main():
 
     # Phase B starts only after the best checkpoint and validation-only global threshold are frozen.
     test_cache = extract_base_logit_cache(model, config, device, "test", combos, smoke=args.smoke)
-    test_case_ids = [record.case_id for record in splits["test"][:2]] if args.smoke else [record.case_id for record in splits["test"]]
+    test_records = smoke_records(splits["test"]) if args.smoke else splits["test"]
+    test_case_ids = [record.case_id for record in test_records]
     validate_cache_frame(test_cache, "test", test_case_ids, combos)
     cache_metadata["test"] = save_cache(test_cache, cache_dir, "test")
     cache_metadata["test_cache_created_after_checkpoint_and_threshold_freeze"] = True
