@@ -23,6 +23,7 @@ E4B_OUTPUT="${OUTPUT_ROOT}/frozen_affine_e4b_seed42"
   --source-checkpoint "${SOURCE_CHECKPOINT}" \
   --data-root "${UTSW_DATA_ROOT}" \
   --output-dir "${E4B_OUTPUT}" \
+  --reuse-cache \
   --device cuda
 
 "${PYTHON_BIN}" evaluate.py \

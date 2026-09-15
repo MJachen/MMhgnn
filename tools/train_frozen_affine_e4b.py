@@ -42,6 +42,8 @@ def parse_args():
     parser.add_argument("--output-dir", default=None)
     parser.add_argument("--device", default=None)
     parser.add_argument("--smoke", action="store_true")
+    parser.add_argument("--reuse-cache", action="store_true")
+    parser.add_argument("--auc-invariance-smoke", action="store_true")
     return parser.parse_args()
 
 
@@ -196,38 +198,59 @@ def aligned_from_cache(model, base_logits: torch.Tensor, masks: torch.Tensor):
     scale = F.softplus(raw_scale) + float(model.mask_affine_eps)
     aligned_binary = scale * base_logits + bias
     logits = torch.stack([-0.5 * aligned_binary, 0.5 * aligned_binary], dim=-1)
-    return logits, torch.sigmoid(aligned_binary), scale, bias
+    return logits, torch.sigmoid(aligned_binary), aligned_binary, scale, bias
 
 
-def safe_auc(y_true, y_prob) -> float:
-    return float(roc_auc_score(y_true, y_prob)) if len(np.unique(y_true)) == 2 else float("nan")
+def safe_auc(y_true, scores) -> float:
+    return float(roc_auc_score(y_true, scores)) if len(np.unique(y_true)) == 2 else float("nan")
+
+
+def validate_affine_outputs(masks: torch.Tensor, scale: torch.Tensor, bias: torch.Tensor) -> None:
+    if not torch.all(scale > 0):
+        raise RuntimeError("E4B produced a non-positive affine scale.")
+    for mask in torch.unique(masks, dim=0):
+        selected = torch.all(masks == mask, dim=1)
+        selected_scale = scale[selected]
+        selected_bias = bias[selected]
+        if not torch.allclose(selected_scale, selected_scale[:1].expand_as(selected_scale), rtol=0.0, atol=0.0):
+            raise RuntimeError("Samples with the same modality mask received different affine scales.")
+        if not torch.allclose(selected_bias, selected_bias[:1].expand_as(selected_bias), rtol=0.0, atol=0.0):
+            raise RuntimeError("Samples with the same modality mask received different affine biases.")
 
 
 @torch.no_grad()
 def evaluate_cache(model, frame: pd.DataFrame, device, modalities, threshold: float = 0.5):
     base, masks, _ = frame_tensors(frame, device)
-    _, probability, scale, bias = aligned_from_cache(model, base, masks)
+    _, probability, aligned_binary, scale, bias = aligned_from_cache(model, base, masks)
+    validate_affine_outputs(masks, scale, bias)
     evaluated = frame.copy()
     evaluated["y_prob"] = probability.cpu().numpy()
-    evaluated["aligned_logit"] = torch.logit(probability.clamp(1e-7, 1 - 1e-7)).cpu().numpy()
+    evaluated["aligned_logit"] = aligned_binary.cpu().numpy()
     evaluated["affine_scale"] = scale.cpu().numpy()
     evaluated["affine_bias"] = bias.cpu().numpy()
     metrics_by_combo = {}
     auc_rows = []
     for combo_name, group in evaluated.groupby("combo", sort=False):
         metrics = compute_binary_metrics(group["y_true"], group["y_prob"], threshold=threshold)
-        base_auc = safe_auc(group["y_true"], group["base_prob"])
-        aligned_auc = float(metrics["auc"])
+        base_auc = safe_auc(group["y_true"], group["base_logit"])
+        aligned_auc = safe_auc(group["y_true"], group["aligned_logit"])
+        metrics["auc"] = aligned_auc
+        base_probability_auc = safe_auc(group["y_true"], group["base_prob"])
+        aligned_probability_auc = safe_auc(group["y_true"], group["y_prob"])
         auc_rows.append(
             {
                 "combo": combo_name,
                 "base_auc": base_auc,
                 "aligned_auc": aligned_auc,
                 "delta_auc": aligned_auc - base_auc,
+                "base_probability_auc": base_probability_auc,
+                "aligned_probability_auc": aligned_probability_auc,
+                "probability_delta_auc": aligned_probability_auc - base_probability_auc,
             }
         )
         metrics_by_combo[combo_name] = metrics
     pooled = compute_binary_metrics(evaluated["y_true"], evaluated["y_prob"], threshold=threshold)
+    pooled["auc"] = safe_auc(evaluated["y_true"], evaluated["aligned_logit"])
     summary = summarize_missing_pattern_metrics(metrics_by_combo, modalities)
     summary["pooled_bal_acc"] = float(pooled["bal_acc"])
     summary["pooled_auc"] = float(pooled["auc"])
@@ -247,7 +270,14 @@ def save_cache(frame: pd.DataFrame, cache_dir: Path, split_name: str) -> Dict:
     }
 
 
-def validate_cache_frame(frame: pd.DataFrame, split_name: str, case_ids: Iterable[str], combos) -> None:
+def validate_cache_frame(
+    frame: pd.DataFrame,
+    split_name: str,
+    case_ids: Iterable[str],
+    combos,
+    labels_by_case: Dict[str, int] | None = None,
+    expected_masks_by_combo: Dict[str, str] | None = None,
+) -> None:
     expected_cases = set(case_ids)
     expected_combos = {"_".join(combo) for combo in combos}
     if set(frame["split"].unique()) != {split_name}:
@@ -261,6 +291,68 @@ def validate_cache_frame(frame: pd.DataFrame, split_name: str, case_ids: Iterabl
     counts = frame.groupby("combo")["case_id"].nunique()
     if not (counts == len(expected_cases)).all():
         raise RuntimeError(f"Patterns are not equally represented in {split_name} cache.")
+    if labels_by_case is not None:
+        actual_labels = frame.groupby("case_id")["y_true"].unique()
+        for case_id, values in actual_labels.items():
+            if len(values) != 1 or int(values[0]) != int(labels_by_case[case_id]):
+                raise RuntimeError(f"Cache label provenance mismatch for {split_name}/{case_id}.")
+    if expected_masks_by_combo is not None:
+        for combo_name, group in frame.groupby("combo", sort=False):
+            actual_masks = set(group["mask"].astype(str))
+            if actual_masks != {expected_masks_by_combo[combo_name]}:
+                raise RuntimeError(f"Cache modality mask mismatch for {split_name}/{combo_name}.")
+
+
+def load_reusable_train_val_cache(cache_dir, source_path, source_checkpoint, splits, combos, model, smoke=False):
+    if smoke:
+        raise RuntimeError("Formal train/validation caches cannot be reused for a two-subject smoke run.")
+    provenance_path = cache_dir / "cache_provenance.json"
+    train_path = cache_dir / "train_base_logits.csv"
+    val_path = cache_dir / "val_base_logits.csv"
+    if not all(path.is_file() for path in [provenance_path, train_path, val_path]):
+        raise RuntimeError("Requested E4B cache reuse, but train/validation cache artifacts are incomplete.")
+    metadata = load_json(provenance_path)
+    expected_split_sha = hashlib.sha256(json.dumps(split_provenance(splits), sort_keys=True).encode("utf-8")).hexdigest()
+    expected_patterns = ["_".join(combo) for combo in combos]
+    required = {
+        "source_checkpoint_sha256": sha256_file(source_path),
+        "canonical_manifest_sha256": source_checkpoint["canonical_manifest_sha256"],
+        "split_provenance_sha256": expected_split_sha,
+        "mask_order": list(model.mask_order),
+        "modalities": list(model.modalities),
+        "patterns": expected_patterns,
+        "cached_before_checkpoint_selection": ["train", "val"],
+        "test_cache_created_before_checkpoint_and_threshold_freeze": False,
+    }
+    for key, expected in required.items():
+        if metadata.get(key) != expected:
+            raise RuntimeError(f"Unsafe E4B cache reuse: provenance mismatch for {key}.")
+    if "test" in metadata or (cache_dir / "test_base_logits.csv").exists():
+        raise RuntimeError("Unsafe E4B cache reuse: a test cache already exists before checkpoint selection.")
+
+    expected_masks = {
+        "_".join(combo): "".join(str(int(value)) for value in classifier_mask(model.modalities, model.mask_order, combo))
+        for combo in combos
+    }
+    frames = {}
+    for split_name, csv_path in [("train", train_path), ("val", val_path)]:
+        split_metadata = metadata.get(split_name, {})
+        actual_sha = sha256_file(csv_path)
+        if split_metadata.get("sha256") != actual_sha:
+            raise RuntimeError(f"Unsafe E4B cache reuse: SHA-256 mismatch for {split_name} cache.")
+        frame = pd.read_csv(csv_path, dtype={"case_id": str, "split": str, "combo": str, "mask": str})
+        records = splits[split_name]
+        case_ids = [record.case_id for record in records]
+        labels_by_case = {record.case_id: int(record.label) for record in records}
+        validate_cache_frame(frame, split_name, case_ids, combos, labels_by_case, expected_masks)
+        if split_metadata.get("num_rows") != len(frame):
+            raise RuntimeError(f"Unsafe E4B cache reuse: row-count mismatch for {split_name} cache.")
+        if split_metadata.get("num_subjects") != frame["case_id"].nunique():
+            raise RuntimeError(f"Unsafe E4B cache reuse: subject-count mismatch for {split_name} cache.")
+        if split_metadata.get("num_patterns") != frame["combo"].nunique():
+            raise RuntimeError(f"Unsafe E4B cache reuse: pattern-count mismatch for {split_name} cache.")
+        frames[split_name] = frame
+    return frames["train"], frames["val"], metadata
 
 
 def mask_affine_rows(model, combos):
@@ -307,9 +399,8 @@ def train_affine(model, train_frame, val_frame, config, device, criterion, outpu
             batch_masks = batch_masks.to(device)
             batch_labels = batch_labels.to(device)
             optimizer.zero_grad(set_to_none=True)
-            logits, _, scale, _ = aligned_from_cache(model, batch_base, batch_masks)
-            if not torch.all(scale > 0):
-                raise RuntimeError("E4B produced a non-positive affine scale.")
+            logits, _, _, scale, bias = aligned_from_cache(model, batch_base, batch_masks)
+            validate_affine_outputs(batch_masks, scale, bias)
             loss = criterion(logits, batch_labels)
             loss.backward()
             for name, parameter in model.named_parameters():
@@ -421,29 +512,58 @@ def main():
     affine_hash_before = state_hash(model, include_affine=True)
     combos = get_all_modality_combinations(config["data"]["modalities"])
 
-    # Phase A deliberately creates train and validation caches only. Test images are not indexed here.
-    train_cache = extract_base_logit_cache(model, config, device, "train", combos, smoke=args.smoke)
-    val_cache = extract_base_logit_cache(model, config, device, "val", combos, smoke=args.smoke)
     train_records = smoke_records(splits["train"]) if args.smoke else splits["train"]
     val_records = smoke_records(splits["val"]) if args.smoke else splits["val"]
     train_case_ids = [record.case_id for record in train_records]
     val_case_ids = [record.case_id for record in val_records]
-    validate_cache_frame(train_cache, "train", train_case_ids, combos)
-    validate_cache_frame(val_cache, "val", val_case_ids, combos)
-    cache_metadata = {
-        "source_checkpoint": str(source_path),
-        "source_checkpoint_sha256": sha256_file(source_path),
-        "canonical_manifest_sha256": source_checkpoint["canonical_manifest_sha256"],
-        "split_provenance_sha256": hashlib.sha256(json.dumps(split_provenance(splits), sort_keys=True).encode("utf-8")).hexdigest(),
-        "mask_order": list(model.mask_order),
-        "modalities": list(model.modalities),
-        "patterns": ["_".join(combo) for combo in combos],
-        "cached_before_checkpoint_selection": ["train", "val"],
-        "test_cache_created_before_checkpoint_and_threshold_freeze": False,
-        "train": save_cache(train_cache, cache_dir, "train"),
-        "val": save_cache(val_cache, cache_dir, "val"),
-    }
-    save_json(cache_metadata, cache_dir / "cache_provenance.json")
+    if args.reuse_cache:
+        train_cache, val_cache, cache_metadata = load_reusable_train_val_cache(
+            cache_dir, source_path, source_checkpoint, splits, combos, model, smoke=args.smoke
+        )
+        logger.info("Safely reused verified E4B train/validation caches.")
+    else:
+        # Phase A deliberately creates train and validation caches only. Test images are not indexed here.
+        train_cache = extract_base_logit_cache(model, config, device, "train", combos, smoke=args.smoke)
+        val_cache = extract_base_logit_cache(model, config, device, "val", combos, smoke=args.smoke)
+        validate_cache_frame(train_cache, "train", train_case_ids, combos)
+        validate_cache_frame(val_cache, "val", val_case_ids, combos)
+        cache_metadata = {
+            "source_checkpoint": str(source_path),
+            "source_checkpoint_sha256": sha256_file(source_path),
+            "canonical_manifest_sha256": source_checkpoint["canonical_manifest_sha256"],
+            "split_provenance_sha256": hashlib.sha256(json.dumps(split_provenance(splits), sort_keys=True).encode("utf-8")).hexdigest(),
+            "mask_order": list(model.mask_order),
+            "modalities": list(model.modalities),
+            "patterns": ["_".join(combo) for combo in combos],
+            "cached_before_checkpoint_selection": ["train", "val"],
+            "test_cache_created_before_checkpoint_and_threshold_freeze": False,
+            "train": save_cache(train_cache, cache_dir, "train"),
+            "val": save_cache(val_cache, cache_dir, "val"),
+        }
+        save_json(cache_metadata, cache_dir / "cache_provenance.json")
+
+    if args.auc_invariance_smoke:
+        if not args.reuse_cache:
+            raise RuntimeError("AUC-invariance smoke must use --reuse-cache to avoid 3D MRI cache extraction.")
+        _, _, _, auc_rows = evaluate_cache(model, val_cache, device, config["data"]["modalities"])
+        report = {
+            "status": "ok",
+            "cache_reused": True,
+            "test_read": False,
+            "auc_invariance_tolerance": float(e4b.get("auc_invariance_tolerance", 1e-4)),
+            "max_abs_probability_delta_auc": float(auc_rows["probability_delta_auc"].abs().max()),
+            "max_abs_logit_delta_auc": float(auc_rows["delta_auc"].abs().max()),
+            "positive_scale_all_patterns": True,
+            "same_mask_same_scale_bias": True,
+            "frozen_hash_unchanged": state_hash(model, include_affine=False) == frozen_hash_before,
+        }
+        if report["max_abs_logit_delta_auc"] > report["auc_invariance_tolerance"]:
+            raise RuntimeError(
+                f"Logit-space AUC-invariance smoke failed: max |delta|={report['max_abs_logit_delta_auc']:.8f}"
+            )
+        save_json(report, metrics_dir / "auc_invariance_smoke.json")
+        print(json.dumps(report, indent=2))
+        return
 
     class_weights = class_weights_from_records(splits["train"]).to(device)
     criterion = nn.CrossEntropyLoss(weight=class_weights)
