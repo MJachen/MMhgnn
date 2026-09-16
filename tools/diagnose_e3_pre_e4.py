@@ -42,6 +42,9 @@ def parse_args():
     parser.add_argument("--config", default="configs/utsw_idh/missing_aware_aux_e3.yaml")
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--data-root", required=True)
+    parser.add_argument("--manifest-csv", default=None)
+    parser.add_argument("--split-json", default=None)
+    parser.add_argument("--manifest-fingerprint-json", default=None)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--output-prefix", default="e3_validation")
     parser.add_argument("--device", default="cuda")
@@ -94,14 +97,14 @@ def safe_auc(y_true, y_prob):
     return float(roc_auc_score(y_true, y_prob)) if len(np.unique(y_true)) == 2 else float("nan")
 
 
-def optimal_threshold_row(y_true, y_prob):
+def optimal_threshold_row(y_true, y_prob, auc_score=None):
     curve = threshold_curve(y_true, y_prob)
     best = float(curve["balanced_accuracy"].max())
     optimal = curve[np.isclose(curve["balanced_accuracy"], best, rtol=0.0, atol=1e-12)].iloc[0]
     return {
         "optimal_threshold": float(optimal["threshold"]),
         "optimal_bal_acc": best,
-        "auc": safe_auc(y_true, y_prob),
+        "auc": safe_auc(y_true, y_prob if auc_score is None else auc_score),
         "sensitivity": float(optimal["sensitivity"]),
         "specificity": float(optimal["specificity"]),
         "accuracy": float(optimal["accuracy"]),
@@ -195,7 +198,14 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_hash_before = sha256_file(checkpoint_path)
 
-    config = load_config(args.config, overrides={"data": {"root": args.data_root}})
+    data_overrides = {"root": args.data_root}
+    if args.manifest_csv:
+        data_overrides["manifest_csv"] = args.manifest_csv
+    if args.split_json:
+        data_overrides["split_json"] = args.split_json
+    if args.manifest_fingerprint_json:
+        data_overrides["manifest_fingerprint_json"] = args.manifest_fingerprint_json
+    config = load_config(args.config, overrides={"data": data_overrides})
     set_seed(int(config["seed"]))
     device = torch.device(args.device if not args.device.startswith("cuda") or torch.cuda.is_available() else "cpu")
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
@@ -286,7 +296,12 @@ def main():
     pattern_threshold_rows = []
     for combo_name, frame in pooled.groupby("combo", sort=False):
         pattern_threshold_rows.append(
-            {"combo": combo_name, **optimal_threshold_row(frame["y_true"].to_numpy(), frame["y_prob"].to_numpy())}
+            {
+                "combo": combo_name,
+                **optimal_threshold_row(
+                    frame["y_true"].to_numpy(), frame["y_prob"].to_numpy(), frame["binary_logit"].to_numpy()
+                ),
+            }
         )
     pattern_thresholds = pd.DataFrame(pattern_threshold_rows)
     pattern_thresholds.to_csv(output_dir / f"{output_prefix}_pattern_thresholds.csv", index=False)
@@ -359,7 +374,9 @@ def main():
         main_frame = pooled[pooled["combo"] == modality]
         aux_frame = auxiliary[auxiliary["modality"] == modality]
         for predictor, frame in [("main_singleton", main_frame), ("auxiliary_head", aux_frame)]:
-            optimum = optimal_threshold_row(frame["y_true"].to_numpy(), frame["y_prob"].to_numpy())
+            optimum = optimal_threshold_row(
+                frame["y_true"].to_numpy(), frame["y_prob"].to_numpy(), frame["binary_logit"].to_numpy()
+            )
             aux_vs_main_rows.append(
                 {
                     "modality": modality,

@@ -24,6 +24,9 @@ def parse_args():
     parser = argparse.ArgumentParser(description="One-subject UTSW E4A affine forward/backward smoke")
     parser.add_argument("--config", default="configs/utsw_idh/missing_aware_aux_affine_e4a.yaml")
     parser.add_argument("--data-root", required=True)
+    parser.add_argument("--manifest-csv", default=None)
+    parser.add_argument("--split-json", default=None)
+    parser.add_argument("--manifest-fingerprint-json", default=None)
     parser.add_argument("--device", default="cuda")
     return parser.parse_args()
 
@@ -61,7 +64,14 @@ def assert_initialization_and_bias_compatibility(config):
 
 def main():
     args = parse_args()
-    config = load_config(args.config, overrides={"data": {"root": args.data_root}})
+    data_overrides = {"root": args.data_root}
+    if args.manifest_csv:
+        data_overrides["manifest_csv"] = args.manifest_csv
+    if args.split_json:
+        data_overrides["split_json"] = args.split_json
+    if args.manifest_fingerprint_json:
+        data_overrides["manifest_fingerprint_json"] = args.manifest_fingerprint_json
+    config = load_config(args.config, overrides={"data": data_overrides})
     device = torch.device(args.device if not args.device.startswith("cuda") or torch.cuda.is_available() else "cpu")
     set_seed(int(config["seed"]))
     assert_initialization_and_bias_compatibility(config)

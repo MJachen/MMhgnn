@@ -9,7 +9,7 @@ MASK_ORDER = ["t1", "t1ce", "t2", "flair"]
 CALIBRATION_GROUPS_3WAY = ["has_t1ce", "no_t1ce_no_t1", "no_t1ce_with_t1"]
 
 
-def compute_binary_metrics(y_true, y_prob, threshold: float = 0.5) -> Dict[str, float]:
+def compute_binary_metrics(y_true, y_prob, threshold: float = 0.5, auc_score=None) -> Dict[str, float]:
     y_true = np.asarray(y_true).astype(int)
     y_prob = np.asarray(y_prob).astype(float)
     y_pred = (y_prob >= threshold).astype(int)
@@ -26,7 +26,8 @@ def compute_binary_metrics(y_true, y_prob, threshold: float = 0.5) -> Dict[str, 
     auc = float("nan")
     auc_warning = ""
     if len(np.unique(y_true)) >= 2:
-        auc = roc_auc_score(y_true, y_prob)
+        ranking_score = y_prob if auc_score is None else np.asarray(auc_score).astype(float)
+        auc = roc_auc_score(y_true, ranking_score)
     else:
         auc_warning = "AUC skipped because only one class is present in y_true."
 

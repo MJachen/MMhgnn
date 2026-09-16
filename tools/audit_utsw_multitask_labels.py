@@ -13,6 +13,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from utils.io import load_json, save_json
+from utils.utsw import canonical_manifest_fingerprint, sha256_file as project_sha256_file
 from utils.utsw_tasks import normalize_task_label
 
 
@@ -85,9 +86,26 @@ def audit_task(task_name, metadata, manifest, split_assignment, source_path, out
     task_dir.mkdir(parents=True, exist_ok=True)
     audit.to_csv(task_dir / "label_audit.csv", index=False)
     usable = audit.loc[audit["eligible"]].copy()
+
+    task_labels = audit.set_index("case_id")
+    task_manifest = manifest.copy()
+    task_manifest["task_name"] = task_name
+    task_manifest["raw_task_label"] = task_manifest["case_id"].map(task_labels["raw_label"])
+    task_manifest["normalized_task_value"] = task_manifest["case_id"].map(task_labels["normalized_label"])
+    task_manifest["normalized_task_label"] = task_manifest["case_id"].map(task_labels["binary_label"])
+    task_manifest["eligible"] = task_manifest["case_id"].map(task_labels["eligible"])
+    task_manifest["exclusion_reason"] = task_manifest["case_id"].map(task_labels["exclusion_reason"])
+    task_manifest["normalized_task_label"] = task_manifest["normalized_task_label"].map(
+        lambda value: "" if pd.isna(value) else str(int(value))
+    )
+    task_manifest.to_csv(task_dir / "task_manifest.csv", index=False)
+    task_manifest_sha = canonical_manifest_fingerprint(task_manifest, label_column="normalized_task_label")
+
     split_summary = {}
+    filtered_split = {}
     for split_name in ["train", "val", "test"]:
         split_frame = usable.loc[usable["frozen_split"].eq(split_name)]
+        filtered_split[split_name] = split_frame["case_id"].tolist()
         split_summary[split_name] = {
             "cases": int(len(split_frame)),
             "class0": int(split_frame["binary_label"].eq(0).sum()),
@@ -105,6 +123,31 @@ def audit_task(task_name, metadata, manifest, split_assignment, source_path, out
             )
 
     raw_counts = metadata[source_column].astype(str).value_counts(dropna=False).to_dict()
+    split_payload = {
+        "task": task_name,
+        "source_split": "frozen_parent_split",
+        "canonical_manifest_sha256": task_manifest_sha,
+        "train": filtered_split["train"],
+        "val": filtered_split["val"],
+        "test": filtered_split["test"],
+        "counts": {
+            name: {key: split_summary[name][key] for key in ["cases", "class0", "class1"]}
+            for name in ["train", "val", "test"]
+        },
+    }
+    save_json(split_payload, task_dir / "frozen_split.json")
+    fingerprint_payload = {
+        "task": task_name,
+        "label_column": "normalized_task_label",
+        "canonical_manifest_sha256": task_manifest_sha,
+        "task_manifest_sha256": project_sha256_file(task_dir / "task_manifest.csv"),
+        "source_metadata_sha256": sha256_file(source_path),
+        "eligible_cases": int(len(usable)),
+        "class0": int(usable["binary_label"].eq(0).sum()),
+        "class1": int(usable["binary_label"].eq(1).sum()),
+    }
+    save_json(fingerprint_payload, task_dir / "task_manifest_fingerprint.json")
+
     summary = {
         "task": task_name,
         "source_file": str(source_path),
@@ -122,6 +165,8 @@ def audit_task(task_name, metadata, manifest, split_assignment, source_path, out
         },
         "binary_mapping": {"0": task["negative"], "1": task["positive"]},
         "frozen_split_reused": True,
+        "label_column": "normalized_task_label",
+        "canonical_manifest_sha256": task_manifest_sha,
         "split_summary": split_summary,
         "split_has_both_classes": all(item["has_both_classes"] for item in split_summary.values()),
     }

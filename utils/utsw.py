@@ -16,7 +16,6 @@ UTSW_IDH_MUTANT = 1
 UTSW_FINGERPRINT_COLUMNS = [
     "case_id",
     "patient_id",
-    "normalized_idh_label",
     "t2_path",
     "t1ce_path",
     "t1_path",
@@ -48,12 +47,16 @@ def resolve_data_path(data_root: str | Path, relative_path: object) -> Path:
     return Path(data_root).expanduser().resolve().joinpath(*relative.parts)
 
 
-def canonical_manifest_fingerprint(manifest: pd.DataFrame) -> str:
+def canonical_manifest_fingerprint(
+    manifest: pd.DataFrame,
+    label_column: str = "normalized_idh_label",
+) -> str:
     """Hash cohort identity and portable file mappings, independent of CSV formatting."""
-    missing = sorted(set(UTSW_FINGERPRINT_COLUMNS).difference(manifest.columns))
+    columns = ["case_id", "patient_id", label_column, *UTSW_FINGERPRINT_COLUMNS[2:]]
+    missing = sorted(set(columns).difference(manifest.columns))
     if missing:
         raise ValueError(f"Cannot fingerprint UTSW manifest; missing columns: {missing}")
-    canonical = manifest.loc[:, UTSW_FINGERPRINT_COLUMNS].copy()
+    canonical = manifest.loc[:, columns].copy()
     for column in canonical.columns:
         canonical[column] = canonical[column].astype(str).str.strip()
     canonical = canonical.sort_values(["case_id", "patient_id"], kind="stable")

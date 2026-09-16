@@ -27,6 +27,13 @@ BRANCH_DROP_OPTIONS = {
 }
 
 
+def binary_logit_score(logits: torch.Tensor) -> torch.Tensor:
+    """Return the raw class-1 decision score used for ROC-AUC ranking."""
+    if logits.ndim != 2 or logits.shape[1] != 2:
+        raise ValueError(f"Expected binary logits shaped [N, 2], found {tuple(logits.shape)}")
+    return logits[:, 1] - logits[:, 0]
+
+
 def move_batch_to_device(batch: Dict, device: torch.device) -> Dict:
     moved = {}
     for key, value in batch.items():
@@ -93,7 +100,7 @@ def run_epoch(model, loader, device, criterion=None, optimizer=None, grad_clip: 
     training = optimizer is not None
     model.train(training)
     total_loss = 0.0
-    y_true, y_prob = [], []
+    y_true, y_prob, y_score = [], [], []
     stage_stats = []
 
     iterator = tqdm(loader, desc=desc, leave=False)
@@ -112,10 +119,11 @@ def run_epoch(model, loader, device, criterion=None, optimizer=None, grad_clip: 
         total_loss += float(loss.item()) * batch["label"].shape[0]
         y_true.extend(batch["label"].detach().cpu().tolist())
         y_prob.extend(output["prob"].detach().cpu().tolist())
+        y_score.extend(binary_logit_score(output["logits"]).detach().cpu().tolist())
         if "stage_stats" in output:
             stage_stats.extend(output["stage_stats"].detach().cpu().tolist())
 
-    metrics = compute_binary_metrics(y_true, y_prob, threshold=threshold)
+    metrics = compute_binary_metrics(y_true, y_prob, threshold=threshold, auc_score=y_score)
     metrics["loss"] = total_loss / max(len(loader.dataset), 1)
     metrics = _append_optional_stats(metrics, stage_stats)
     metrics = _append_classifier_info(metrics, model)
@@ -165,7 +173,7 @@ def run_auxiliary_epoch(
     total_main_loss = 0.0
     total_aux_loss = 0.0
     total_loss = 0.0
-    y_true, y_prob = [], []
+    y_true, y_prob, y_score = [], [], []
     stage_stats = []
     modalities = list(model.modalities)
     modality_loss_sums = {modality: 0.0 for modality in modalities}
@@ -196,11 +204,12 @@ def run_auxiliary_epoch(
                 modality_loss_sums[modality] += float(per_modality_losses[modality].item()) * count
         y_true.extend(batch["label"].detach().cpu().tolist())
         y_prob.extend(output["prob"].detach().cpu().tolist())
+        y_score.extend(binary_logit_score(output["logits"]).detach().cpu().tolist())
         if "stage_stats" in output:
             stage_stats.extend(output["stage_stats"].detach().cpu().tolist())
 
     num_samples = max(len(loader.dataset), 1)
-    metrics = compute_binary_metrics(y_true, y_prob, threshold=threshold)
+    metrics = compute_binary_metrics(y_true, y_prob, threshold=threshold, auc_score=y_score)
     metrics["loss"] = total_loss / num_samples
     metrics["main_loss"] = total_main_loss / num_samples
     metrics["aux_loss"] = total_aux_loss / num_samples
@@ -231,7 +240,7 @@ def run_dual_view_epoch(
     total_loss = 0.0
     total_full_loss = 0.0
     total_missing_loss = 0.0
-    y_true, full_prob, missing_prob = [], [], []
+    y_true, full_prob, missing_prob, full_score, missing_score = [], [], [], [], []
     stage_stats = []
 
     group_candidates = loader.dataset.targeted_missing_groups()
@@ -267,14 +276,16 @@ def run_dual_view_epoch(
         y_true.extend(batch["label"].detach().cpu().tolist())
         full_prob.extend(full_output["prob"].detach().cpu().tolist())
         missing_prob.extend(missing_output["prob"].detach().cpu().tolist())
+        full_score.extend(binary_logit_score(full_output["logits"]).detach().cpu().tolist())
+        missing_score.extend(binary_logit_score(missing_output["logits"]).detach().cpu().tolist())
         if "stage_stats" in missing_output:
             stage_stats.extend(missing_output["stage_stats"].detach().cpu().tolist())
         subgroup_counts.update(batch["targeted_subgroup"])
         pattern_counts.update("_".join(combo) for combo in batch["missing_combo"])
 
     num_samples = max(len(loader.dataset), 1)
-    metrics = compute_binary_metrics(y_true, missing_prob, threshold=threshold)
-    full_metrics = compute_binary_metrics(y_true, full_prob, threshold=threshold)
+    metrics = compute_binary_metrics(y_true, missing_prob, threshold=threshold, auc_score=missing_score)
+    full_metrics = compute_binary_metrics(y_true, full_prob, threshold=threshold, auc_score=full_score)
     metrics.update({f"full_{name}": value for name, value in full_metrics.items()})
     metrics["loss"] = total_loss / num_samples
     metrics["loss_full"] = total_full_loss / num_samples
@@ -304,7 +315,7 @@ def run_dual_view_epoch(
 
 @torch.no_grad()
 def collect_predictions(model, loader, device, branch_override=None, explain_num_cases: int = 0):
-    y_true, y_prob = [], []
+    y_true, y_prob, y_score = [], [], []
     roi_scores_all, stage_stats_all = [], []
     modality_gates_all = []
     affine_scales_all, affine_biases_all = [], []
@@ -319,6 +330,7 @@ def collect_predictions(model, loader, device, branch_override=None, explain_num
         labels = batch["label"].detach().cpu().numpy()
         y_true.extend(labels.tolist())
         y_prob.extend(probs.tolist())
+        y_score.extend(binary_logit_score(output["logits"]).detach().cpu().tolist())
         roi_scores_all.extend(attn.tolist())
         if "stage_stats" in output:
             stage_stats_all.extend(output["stage_stats"].detach().cpu().tolist())
@@ -344,6 +356,7 @@ def collect_predictions(model, loader, device, branch_override=None, explain_num
     return {
         "y_true": np.asarray(y_true, dtype=int),
         "y_prob": np.asarray(y_prob, dtype=float),
+        "y_score": np.asarray(y_score, dtype=float),
         "roi_scores": np.asarray(roi_scores_all, dtype=float),
         "stage_stats": np.asarray(stage_stats_all, dtype=float) if stage_stats_all else np.zeros((0, 3), dtype=float),
         "modality_gates": np.asarray(modality_gates_all, dtype=float) if modality_gates_all else np.zeros((0, 0, 0), dtype=float),
@@ -381,7 +394,7 @@ def evaluate_with_explanations(
     affine_scales = collected["affine_scales"]
     affine_biases = collected["affine_biases"]
 
-    metrics = compute_binary_metrics(y_true, y_prob, threshold=threshold)
+    metrics = compute_binary_metrics(y_true, y_prob, threshold=threshold, auc_score=collected["y_score"])
     y_pred = (y_prob >= threshold).astype(int)
     cm = confusion_matrix(y_true, y_pred, labels=[0, 1])
     display_names = list(class_names if class_names is not None else ["LGG(0)", "HGG(1)"])
@@ -447,7 +460,10 @@ def evaluate_with_explanations(
             edge_drop_rows = []
             for name, override in BRANCH_DROP_OPTIONS.items():
                 drop_collected = collect_predictions(model, loader, device, branch_override=override)
-                drop_metrics = compute_binary_metrics(drop_collected["y_true"], drop_collected["y_prob"], threshold=threshold)
+                drop_metrics = compute_binary_metrics(
+                    drop_collected["y_true"], drop_collected["y_prob"], threshold=threshold,
+                    auc_score=drop_collected["y_score"],
+                )
                 drop_metrics = _append_optional_stats(drop_metrics, drop_collected["stage_stats"].tolist() if len(drop_collected["stage_stats"]) > 0 else [])
                 drop_metrics = _append_classifier_info(drop_metrics, model)
                 drop_metrics["threshold"] = float(threshold)

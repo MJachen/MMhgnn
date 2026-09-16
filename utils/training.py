@@ -20,7 +20,7 @@ def build_datasets(config: Dict, explicit_eval_combo: Sequence[str] | None = Non
     model_cfg = config["model"]
     dataset_name = str(data_cfg.get("dataset_name", "brats")).casefold()
     split_json = data_cfg.get("split_json")
-    if dataset_name == "utsw_idh":
+    if dataset_name in {"utsw", "utsw_idh"}:
         if not split_json:
             raise ValueError("UTSW requires an explicit frozen split_json.")
         data_root = data_cfg.get("root", data_cfg.get("data_root"))
@@ -30,6 +30,7 @@ def build_datasets(config: Dict, explicit_eval_combo: Sequence[str] | None = Non
             data_cfg["manifest_csv"],
             data_root,
             fingerprint_json=data_cfg.get("manifest_fingerprint_json"),
+            label_column=data_cfg.get("label_column", "normalized_idh_label"),
         )
         expected_fingerprint = None
         if data_cfg.get("manifest_fingerprint_json"):
@@ -143,3 +144,18 @@ def class_weights_from_records(records) -> torch.Tensor:
 def dump_split_summary(splits, output_dir: str):
     summary = {k: {"num_cases": len(v), "labels": [r.label for r in v], "case_ids": [r.case_id for r in v]} for k, v in splits.items()}
     save_json(summary, Path(output_dir) / "split_summary.json")
+
+
+def task_uncertainty_summary(config: Dict, splits: Dict) -> Dict:
+    test_labels = [int(record.label) for record in splits["test"]]
+    class0 = int(sum(label == 0 for label in test_labels))
+    class1 = int(sum(label == 1 for label in test_labels))
+    minority = min(class0, class1)
+    return {
+        "task": config.get("task", {}).get("name", "idh"),
+        "test_n_class0": class0,
+        "test_n_class1": class1,
+        "minority_test_n": minority,
+        "small_test_subgroup_warning": bool(minority < 10),
+        "benchmark_scope": "same_split_exploratory_transfer",
+    }

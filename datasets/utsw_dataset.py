@@ -34,12 +34,13 @@ def load_utsw_records(
     manifest_csv: str | Path,
     data_root: str | Path,
     fingerprint_json: str | Path | None = None,
+    label_column: str = "normalized_idh_label",
 ) -> List[UTSWCaseRecord]:
     manifest = pd.read_csv(manifest_csv, dtype=str, keep_default_na=False)
     required = {
         "case_id",
         "patient_id",
-        "normalized_idh_label",
+        label_column,
         "eligible",
         "geometry_qc_status",
         "mri_source_version",
@@ -68,7 +69,12 @@ def load_utsw_records(
 
     if fingerprint_json:
         payload = load_json(fingerprint_json)
-        actual = canonical_manifest_fingerprint(manifest)
+        declared_label_column = str(payload.get("label_column", label_column))
+        if declared_label_column != label_column:
+            raise RuntimeError(
+                f"UTSW fingerprint label column mismatch: expected={label_column} declared={declared_label_column}"
+            )
+        actual = canonical_manifest_fingerprint(manifest, label_column=label_column)
         expected = str(payload["canonical_manifest_sha256"])
         if actual != expected:
             raise RuntimeError(f"UTSW manifest fingerprint mismatch: expected={expected} actual={actual}")
@@ -85,7 +91,7 @@ def load_utsw_records(
                 case_id=row["case_id"],
                 patient_id=row["patient_id"],
                 case_dir=files["t2"].parent,
-                label=int(row["normalized_idh_label"]),
+                label=int(row[label_column]),
                 files=files,
             )
         )
@@ -129,10 +135,17 @@ def split_utsw_records(
     for name, values in splits.items():
         actual = {
             "cases": len(values),
-            "idh_wildtype": sum(record.label == 0 for record in values),
-            "idh_mutant": sum(record.label == 1 for record in values),
+            "class0": sum(record.label == 0 for record in values),
+            "class1": sum(record.label == 1 for record in values),
         }
-        if declared_counts.get(name) != actual:
+        declared = declared_counts.get(name)
+        if declared and "idh_wildtype" in declared:
+            declared = {
+                "cases": declared["cases"],
+                "class0": declared["idh_wildtype"],
+                "class1": declared["idh_mutant"],
+            }
+        if declared != actual:
             raise RuntimeError(f"UTSW split {name} count metadata mismatch: declared={declared_counts.get(name)} actual={actual}")
     return splits
 

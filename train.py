@@ -17,7 +17,7 @@ from utils.curriculum import curriculum_sampling_ratios, reset_bad_epochs_on_sta
 from utils.io import load_json, save_json
 from utils.metrics import build_drop_t1_ablation_report, calibrate_grouped_3way_t1ce_t1, calibrate_threshold, compute_binary_metrics, summarize_missing_pattern_metrics, threshold_dispatch_for_combo, threshold_for_combo
 from utils.runner import collect_predictions, evaluate_with_explanations, run_auxiliary_epoch, run_dual_view_epoch, run_epoch
-from utils.training import build_dataloader, build_datasets, build_sampler, class_weights_from_records, dump_split_summary
+from utils.training import build_dataloader, build_datasets, build_sampler, class_weights_from_records, dump_split_summary, task_uncertainty_summary
 from utils.visualization import save_fusion_weight_history
 
 
@@ -29,29 +29,34 @@ def parse_args():
     parser.add_argument("--data-root", type=str, default=None)
     parser.add_argument("--manifest-csv", type=str, default=None)
     parser.add_argument("--split-json", type=str, default=None)
+    parser.add_argument("--manifest-fingerprint-json", type=str, default=None)
     parser.add_argument("--resume", type=str, default=None)
     return parser.parse_args()
 
 
 def collect_validation_predictions_for_combos(model, config, device, combos, threshold: float = 0.5):
-    y_true, y_prob, combo_tags = [], [], []
+    y_true, y_prob, y_score, combo_tags = [], [], [], []
     metrics_by_combo = {}
     for combo in combos:
         _, val_ds_combo, _, _ = build_datasets(config, explicit_eval_combo=combo)
         val_loader_combo = build_dataloader(val_ds_combo, config["train"]["batch_size"], config["data"].get("num_workers", 0), shuffle=False)
         collected = collect_predictions(model, val_loader_combo, device)
         combo_name = "_".join(combo)
-        combo_metrics = compute_binary_metrics(collected["y_true"], collected["y_prob"], threshold=threshold)
+        combo_metrics = compute_binary_metrics(
+            collected["y_true"], collected["y_prob"], threshold=threshold, auc_score=collected["y_score"]
+        )
         if collected["affine_scales"].size > 0:
             combo_metrics["mean_affine_scale"] = float(collected["affine_scales"].mean())
             combo_metrics["mean_affine_bias"] = float(collected["affine_biases"].mean())
         metrics_by_combo[combo_name] = combo_metrics
         y_true.extend(collected["y_true"].tolist())
         y_prob.extend(collected["y_prob"].tolist())
+        y_score.extend(collected["y_score"].tolist())
         combo_tags.extend(collected.get("combos", [tuple(combo)] * len(collected["y_true"])))
     return {
         "y_true": y_true,
         "y_prob": y_prob,
+        "y_score": y_score,
         "combos": combo_tags,
         "metrics_by_combo": metrics_by_combo,
         "summary": summarize_missing_pattern_metrics(metrics_by_combo, config["data"]["modalities"]),
@@ -155,6 +160,8 @@ def main():
         data_overrides["manifest_csv"] = args.manifest_csv
     if args.split_json is not None:
         data_overrides["split_json"] = args.split_json
+    if args.manifest_fingerprint_json is not None:
+        data_overrides["manifest_fingerprint_json"] = args.manifest_fingerprint_json
     if data_overrides:
         overrides["data"] = data_overrides
     if args.resume is not None:
@@ -761,6 +768,8 @@ def main():
             )
         save_json(missing_pattern_summary, metrics_dir / "test_missing_pattern_summary.json")
         pd.DataFrame(missing_pattern_summary["groups"]).to_csv(metrics_dir / "test_missing_pattern_groups.csv", index=False)
+        uncertainty = task_uncertainty_summary(config, splits)
+        save_json(uncertainty, metrics_dir / "task_uncertainty.json")
         logger.info(
             "15-pattern test summary | mean BAC=%.4f mean AUC=%.4f full BAC=%.4f full AUC=%.4f",
             float(missing_pattern_summary["mean15_bal_acc"]),

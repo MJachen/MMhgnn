@@ -1,0 +1,22 @@
+base_config: "../utsw_idh/frozen_affine_e4b.yaml"
+
+task:
+  name: mgmt
+  display_name: MGMT
+  negative_class: unmethylated
+  positive_class: methylated
+
+output_dir: outputs/utsw_multitask/mgmt/e4b_seed42
+
+data:
+  dataset_name: utsw
+  label_column: normalized_task_label
+  manifest_csv: outputs/utsw_multitask/mgmt/task_manifest.csv
+  manifest_fingerprint_json: outputs/utsw_multitask/mgmt/task_manifest_fingerprint.json
+  split_json: outputs/utsw_multitask/mgmt/frozen_split.json
+
+eval:
+  class_names: [Unmethylated(0), Methylated(1)]
+
+e4b:
+  source_checkpoint: outputs/utsw_multitask/mgmt/e4a_seed42/checkpoints/best.pt

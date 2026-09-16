@@ -27,6 +27,7 @@ def parse_args():
     parser.add_argument("--data-root", type=str, default=None)
     parser.add_argument("--manifest-csv", type=str, default=None)
     parser.add_argument("--split-json", type=str, default=None)
+    parser.add_argument("--manifest-fingerprint-json", type=str, default=None)
     return parser.parse_args()
 
 
@@ -60,6 +61,8 @@ def main():
         data_overrides["manifest_csv"] = args.manifest_csv
     if args.split_json is not None:
         data_overrides["split_json"] = args.split_json
+    if args.manifest_fingerprint_json is not None:
+        data_overrides["manifest_fingerprint_json"] = args.manifest_fingerprint_json
     if data_overrides:
         overrides["data"] = data_overrides
     config = load_config(args.config, overrides=overrides or None)

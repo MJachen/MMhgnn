@@ -28,7 +28,7 @@ from utils.config import ensure_dir
 from utils.io import load_json, save_json
 from utils.metrics import calibrate_threshold, compute_binary_metrics, summarize_missing_pattern_metrics
 from utils.runner import move_batch_to_device
-from utils.training import build_dataloader, build_datasets, class_weights_from_records
+from utils.training import build_dataloader, build_datasets, class_weights_from_records, task_uncertainty_summary
 
 
 AFFINE_PREFIXES = ("mask_encoder.", "mask_affine_head.")
@@ -39,6 +39,9 @@ def parse_args():
     parser.add_argument("--config", default="configs/utsw_idh/frozen_affine_e4b.yaml")
     parser.add_argument("--source-checkpoint", default=None)
     parser.add_argument("--data-root", default=None)
+    parser.add_argument("--manifest-csv", default=None)
+    parser.add_argument("--split-json", default=None)
+    parser.add_argument("--manifest-fingerprint-json", default=None)
     parser.add_argument("--output-dir", default=None)
     parser.add_argument("--device", default=None)
     parser.add_argument("--smoke", action="store_true")
@@ -231,7 +234,9 @@ def evaluate_cache(model, frame: pd.DataFrame, device, modalities, threshold: fl
     metrics_by_combo = {}
     auc_rows = []
     for combo_name, group in evaluated.groupby("combo", sort=False):
-        metrics = compute_binary_metrics(group["y_true"], group["y_prob"], threshold=threshold)
+        metrics = compute_binary_metrics(
+            group["y_true"], group["y_prob"], threshold=threshold, auc_score=group["aligned_logit"]
+        )
         base_auc = safe_auc(group["y_true"], group["base_logit"])
         aligned_auc = safe_auc(group["y_true"], group["aligned_logit"])
         metrics["auc"] = aligned_auc
@@ -249,7 +254,10 @@ def evaluate_cache(model, frame: pd.DataFrame, device, modalities, threshold: fl
             }
         )
         metrics_by_combo[combo_name] = metrics
-    pooled = compute_binary_metrics(evaluated["y_true"], evaluated["y_prob"], threshold=threshold)
+    pooled = compute_binary_metrics(
+        evaluated["y_true"], evaluated["y_prob"], threshold=threshold,
+        auc_score=evaluated["aligned_logit"],
+    )
     pooled["auc"] = safe_auc(evaluated["y_true"], evaluated["aligned_logit"])
     summary = summarize_missing_pattern_metrics(metrics_by_combo, modalities)
     summary["pooled_bal_acc"] = float(pooled["bal_acc"])
@@ -472,8 +480,17 @@ def train_affine(model, train_frame, val_frame, config, device, criterion, outpu
 def main():
     args = parse_args()
     overrides = {}
+    data_overrides = {}
     if args.data_root:
-        overrides["data"] = {"root": args.data_root}
+        data_overrides["root"] = args.data_root
+    if args.manifest_csv:
+        data_overrides["manifest_csv"] = args.manifest_csv
+    if args.split_json:
+        data_overrides["split_json"] = args.split_json
+    if args.manifest_fingerprint_json:
+        data_overrides["manifest_fingerprint_json"] = args.manifest_fingerprint_json
+    if data_overrides:
+        overrides["data"] = data_overrides
     if args.output_dir:
         overrides["output_dir"] = args.output_dir
     config = load_config(args.config, overrides=overrides or None)
@@ -669,8 +686,7 @@ def main():
     pd.DataFrame(test_summary["groups"]).to_csv(metrics_dir / "test_missing_pattern_groups.csv", index=False)
     save_json(test_summary, metrics_dir / "test_missing_pattern_summary.json")
     test_auc_rows.to_csv(metrics_dir / "test_auc_invariance.csv", index=False)
-    save_json(
-        {
+    final_summary = {
             "status": "ok",
             "smoke": bool(args.smoke),
             "best_epoch": int(best_checkpoint["epoch"]),
@@ -683,9 +699,10 @@ def main():
             "frozen_hash_unchanged": frozen_hash_after == frozen_hash_before,
             "affine_hash_changed": affine_hash_after != affine_hash_before,
             "test_read_after_checkpoint_and_threshold_freeze": True,
-        },
-        output_dir / "e4b_run_summary.json",
-    )
+        }
+    final_summary.update(task_uncertainty_summary(config, splits))
+    save_json(final_summary, output_dir / "e4b_run_summary.json")
+    save_json(task_uncertainty_summary(config, splits), metrics_dir / "task_uncertainty.json")
 
 
 if __name__ == "__main__":

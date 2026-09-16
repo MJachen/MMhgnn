@@ -1,0 +1,19 @@
+base_config: "../utsw_idh/missing_aware_aux_affine_e4a.yaml"
+
+task:
+  name: grade_2_vs_34
+  display_name: Grade 2 vs 3/4
+  negative_class: grade_2
+  positive_class: grade_3_4
+
+output_dir: outputs/utsw_multitask/grade_2_vs_34/e4a_seed42
+
+data:
+  dataset_name: utsw
+  label_column: normalized_task_label
+  manifest_csv: outputs/utsw_multitask/grade_2_vs_34/task_manifest.csv
+  manifest_fingerprint_json: outputs/utsw_multitask/grade_2_vs_34/task_manifest_fingerprint.json
+  split_json: outputs/utsw_multitask/grade_2_vs_34/frozen_split.json
+
+eval:
+  class_names: [Grade-2(0), Grade-3/4(1)]
