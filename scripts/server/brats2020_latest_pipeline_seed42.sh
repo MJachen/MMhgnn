@@ -19,6 +19,7 @@ fi
 
 cd "${PROJECT_ROOT}"
 export CUDA_VISIBLE_DEVICES="${GPU_ID}"
+export PYTHONPATH="${PROJECT_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
 
 [[ -f "${SPLIT_JSON}" ]] || { echo "Missing frozen historical split: ${SPLIT_JSON}" >&2; exit 3; }
 [[ ! -e "${E4A_OUTPUT}/checkpoints/best.pt" ]] || { echo "Refusing to overwrite E4A best.pt" >&2; exit 4; }
