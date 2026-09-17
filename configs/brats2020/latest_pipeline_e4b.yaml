@@ -1,0 +1,40 @@
+base_config: "../utsw_idh/frozen_affine_e4b.yaml"
+
+task:
+  name: brats2020_hgg_lgg
+  display_name: BraTS2020 HGG vs LGG
+  negative_class: LGG
+  positive_class: HGG
+
+output_dir: outputs/cross_task/brats2020_hgg_lgg/e4b_seed42
+
+data:
+  dataset_name: brats
+  data_root: /home/cjc/brats2020/brats2021
+  label_xlsx: /home/cjc/brats2020/brats2021_label2020.xlsx
+  case_id_col: BraTS2021
+  case_id_col_index: null
+  label_col: label
+  label_col_index: null
+  modalities: [t2, t1ce, t1, flair]
+  image_filename_pattern: "{case_id}_{mod}.nii.gz"
+  seg_filename_pattern: "{case_id}_seg.nii.gz"
+  mask_filename_pattern: null
+  tumor_mask_source: seg
+  split_ratio: [0.8, 0.1, 0.1]
+  split_json: outputs/cross_task/brats2020_hgg_lgg/frozen_split.json
+  manifest_fingerprint_json: outputs/cross_task/brats2020_hgg_lgg/dataset_fingerprint.json
+  target_shape: null
+  crop_mode: wt_bbox
+  bbox_margin: 6
+  num_workers: 0
+
+eval:
+  class_names: [LGG(0), HGG(1)]
+  explain_num_cases: 0
+  edge_type_drop_enabled: false
+  roi_drop_enabled: false
+  test_all_combos: true
+
+e4b:
+  source_checkpoint: outputs/cross_task/brats2020_hgg_lgg/e4a_seed42/checkpoints/best.pt

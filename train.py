@@ -713,6 +713,10 @@ def main():
         calibration_result.get("score"),
     )
 
+    if not bool(config.get("eval", {}).get("run_test_after_training", True)):
+        logger.info("Post-training test evaluation disabled by eval.run_test_after_training=false.")
+        return
+
     combos = get_all_modality_combinations(config["data"]["modalities"]) if config["eval"].get("test_all_combos", True) else [tuple(config["train"].get("fixed_combo", config["data"]["modalities"]))]
 
     all_test_metrics = {}
